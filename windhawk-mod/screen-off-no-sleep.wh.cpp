@@ -232,6 +232,7 @@ static UINT g_triggerMessage = 0;
 static UINT g_triggerMessageAlt = 0;
 
 static bool g_lidClosed = false;
+static bool g_lidStateInitialized = false;
 static std::atomic<bool> g_watchdogActive{false};
 static bool g_hotkeyRegistered = false;
 
@@ -1080,8 +1081,16 @@ static void TriggerFlow(int source) {
     Wh_Log(L"VIDEOIDLE=1 s injected with blackout overlay; waiting for GUID_CONSOLE_DISPLAY_STATE=0");
 }
 
-static void HandleLidState(bool closed) {
-    if (closed) {
+static void HandleLidState(bool isClosed) {
+    if (!g_lidStateInitialized) {
+        g_lidClosed = isClosed;
+        g_lidStateInitialized = true;
+        Wh_Log(L"Initial lid state notification received: %s (ignoring trigger)",
+               isClosed ? L"closed" : L"open");
+        return;
+    }
+
+    if (isClosed) {
         if (g_lidClosed) {
             return;
         }
@@ -1092,7 +1101,7 @@ static void HandleLidState(bool closed) {
             return;
         }
 
-        Wh_Log(L"Lid closed; triggering immediately");
+        Wh_Log(L"Lid closed transition detected; triggering immediately");
         TriggerFlow(0);
         return;
     }
@@ -1163,7 +1172,9 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam,
 
                     if (GuidEqual(setting->PowerSetting,
                                   GUID_LIDSWITCH_STATE_CHANGE_LOCAL)) {
-                        HandleLidState(ReadPowerSettingDword(setting) != 0);
+                        // GUID_LIDSWITCH_STATE_CHANGE: 0 = closed, 1 = open
+                        DWORD rawVal = ReadPowerSettingDword(setting);
+                        HandleLidState(rawVal == 0);
                     } else if (GuidEqual(setting->PowerSetting,
                                          GUID_CONSOLE_DISPLAY_STATE_LOCAL)) {
                         HandleDisplayState(ReadPowerSettingDword(setting));
@@ -1339,6 +1350,8 @@ BOOL WhTool_ModInit() {
 
     g_lastDisplayOnTick = GetTickCount64();
     g_displayOn = true;
+    g_lidClosed = false;
+    g_lidStateInitialized = false;
 
     Wh_Log(L"=== Init complete ===");
     return TRUE;
