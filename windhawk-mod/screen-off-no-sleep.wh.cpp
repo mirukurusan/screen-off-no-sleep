@@ -210,6 +210,8 @@ static std::atomic<bool> g_flowActive{false};
 static SavedPowerState g_flowSavedState = {};
 
 // Entry-thread state
+static HANDLE g_hThread = NULL;
+static HANDLE g_hInitEvent = NULL;
 static HWND g_hWnd = NULL;
 static HWND g_hBlackoutWnd = NULL;
 static HPOWERNOTIFY g_lidNotify = NULL;
@@ -1209,7 +1211,123 @@ static void LogNativeActionWarnings() {
     LeaveCriticalSection(&g_powerLock);
 }
 
-// ─── Windhawk Tool-Mod Callbacks ────────────────────────────────────────────
+// ─── Windhawk Tool-Mod Worker Thread & Callbacks ─────────────────────────────
+
+static DWORD WINAPI ToolModThreadProc(LPVOID lpParam) {
+    Wh_Log(L"[Thread] Starting (TID: %lu)", GetCurrentThreadId());
+
+    // 1. Register Blackout Window Class
+    WNDCLASSEX bwc = {};
+    bwc.cbSize = sizeof(WNDCLASSEX);
+    bwc.lpfnWndProc = BlackoutWndProc;
+    bwc.hInstance = GetModuleHandle(NULL);
+    bwc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    bwc.hCursor = NULL;
+    bwc.lpszClassName = BLACKOUT_WINDOW_CLASS;
+
+    if (!RegisterClassEx(&bwc)) {
+        Wh_Log(L"[Thread] RegisterClassEx (Blackout) failed: %lu", GetLastError());
+    }
+
+    // 2. Register Mod Control Window Class
+    WNDCLASSEX wc = {};
+    wc.cbSize = sizeof(WNDCLASSEX);
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = GetModuleHandle(NULL);
+    wc.lpszClassName = MOD_WINDOW_CLASS;
+
+    ATOM atom = RegisterClassEx(&wc);
+    if (!atom) {
+        Wh_Log(L"[Thread] RegisterClassEx (Mod) failed: %lu", GetLastError());
+        UnregisterClass(BLACKOUT_WINDOW_CLASS, GetModuleHandle(NULL));
+        if (g_hInitEvent) SetEvent(g_hInitEvent);
+        return 1;
+    }
+
+    g_hWnd = CreateWindowEx(
+        0, MOD_WINDOW_CLASS, L"ModernIdleSleep", WS_OVERLAPPED,
+        0, 0, 0, 0, NULL, NULL, GetModuleHandle(NULL), NULL);
+
+    if (!g_hWnd) {
+        Wh_Log(L"[Thread] CreateWindowEx failed: %lu", GetLastError());
+        UnregisterClass(MOD_WINDOW_CLASS, GetModuleHandle(NULL));
+        UnregisterClass(BLACKOUT_WINDOW_CLASS, GetModuleHandle(NULL));
+        if (g_hInitEvent) SetEvent(g_hInitEvent);
+        return 1;
+    }
+
+    ShowWindow(g_hWnd, SW_HIDE);
+    Wh_Log(L"[Thread] Hidden window created: HWND=%p", (void*)g_hWnd);
+
+    ChangeWindowMessageFilterEx(g_hWnd, WM_INPUT, MSGFLT_ALLOW, nullptr);
+
+    g_triggerMessage = RegisterWindowMessageW(TRIGGER_MESSAGE_NAME);
+    g_triggerMessageAlt = RegisterWindowMessageW(TRIGGER_MESSAGE_NAME_ALT);
+    if (g_triggerMessage || g_triggerMessageAlt) {
+        Wh_Log(L"[Thread] External trigger messages registered: 0x%04X, 0x%04X",
+               g_triggerMessage, g_triggerMessageAlt);
+        if (g_triggerMessage) {
+            ChangeWindowMessageFilterEx(g_hWnd, g_triggerMessage, MSGFLT_ALLOW, nullptr);
+        }
+        if (g_triggerMessageAlt) {
+            ChangeWindowMessageFilterEx(g_hWnd, g_triggerMessageAlt, MSGFLT_ALLOW, nullptr);
+        }
+    }
+
+    g_lidNotify = RegisterPowerSettingNotification(
+        g_hWnd, &GUID_LIDSWITCH_STATE_CHANGE_LOCAL,
+        DEVICE_NOTIFY_WINDOW_HANDLE);
+
+    g_displayNotify = RegisterPowerSettingNotification(
+        g_hWnd, &GUID_CONSOLE_DISPLAY_STATE_LOCAL,
+        DEVICE_NOTIFY_WINDOW_HANDLE);
+
+    if (!g_displayNotify) {
+        Wh_Log(L"[Thread] Display state notification registration failed: %lu; aborting",
+               GetLastError());
+        DestroyWindow(g_hWnd);
+        g_hWnd = NULL;
+        UnregisterClass(MOD_WINDOW_CLASS, GetModuleHandle(NULL));
+        UnregisterClass(BLACKOUT_WINDOW_CLASS, GetModuleHandle(NULL));
+        if (g_hInitEvent) SetEvent(g_hInitEvent);
+        return 1;
+    }
+
+    RegisterPowerButtonRawInput();
+    UpdateTriggerHotkey();
+
+    Wh_Log(L"[Thread] Listening. Hotkey, Lid, PowerButton and external message are active.");
+
+    if (g_hInitEvent) {
+        SetEvent(g_hInitEvent);
+    }
+
+    MSG msg;
+    while (GetMessage(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
+    Wh_Log(L"[Thread] Message loop exited; cleaning up");
+
+    DestroyBlackoutWindow();
+
+    if (g_lidNotify) {
+        UnregisterPowerSettingNotification(g_lidNotify);
+        g_lidNotify = NULL;
+    }
+    if (g_displayNotify) {
+        UnregisterPowerSettingNotification(g_displayNotify);
+        g_displayNotify = NULL;
+    }
+
+    UnregisterClass(MOD_WINDOW_CLASS, GetModuleHandle(NULL));
+    UnregisterClass(BLACKOUT_WINDOW_CLASS, GetModuleHandle(NULL));
+    g_hWnd = NULL;
+
+    Wh_Log(L"[Thread] Exiting");
+    return 0;
+}
 
 BOOL WhTool_ModInit() {
     Wh_Log(L"=== Turn Off Display Without Sleep: Init ===");
@@ -1229,116 +1347,34 @@ BOOL WhTool_ModInit() {
     g_lidClosed = false;
     g_lidStateInitialized = false;
 
-    Wh_Log(L"=== Init complete ===");
-    return TRUE;
-}
+    g_hInitEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
 
-void WhTool_ModEntryPoint() {
-    Wh_Log(L"[EntryPoint] Starting (TID: %lu)", GetCurrentThreadId());
-
-    // 1. Register Blackout Window Class
-    WNDCLASSEX bwc = {};
-    bwc.cbSize = sizeof(WNDCLASSEX);
-    bwc.lpfnWndProc = BlackoutWndProc;
-    bwc.hInstance = GetModuleHandle(NULL);
-    bwc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
-    bwc.hCursor = NULL;
-    bwc.lpszClassName = BLACKOUT_WINDOW_CLASS;
-
-    if (!RegisterClassEx(&bwc)) {
-        Wh_Log(L"[EntryPoint] RegisterClassEx (Blackout) failed: %lu", GetLastError());
+    g_hThread = CreateThread(nullptr, 0, ToolModThreadProc, nullptr, 0, nullptr);
+    if (!g_hThread) {
+        Wh_Log(L"CreateThread failed: %lu", GetLastError());
+        if (g_hInitEvent) {
+            CloseHandle(g_hInitEvent);
+            g_hInitEvent = NULL;
+        }
+        return FALSE;
     }
 
-    // 2. Register Mod Control Window Class
-    WNDCLASSEX wc = {};
-    wc.cbSize = sizeof(WNDCLASSEX);
-    wc.lpfnWndProc = WndProc;
-    wc.hInstance = GetModuleHandle(NULL);
-    wc.lpszClassName = MOD_WINDOW_CLASS;
-
-    ATOM atom = RegisterClassEx(&wc);
-    if (!atom) {
-        Wh_Log(L"[EntryPoint] RegisterClassEx (Mod) failed: %lu", GetLastError());
-        UnregisterClass(BLACKOUT_WINDOW_CLASS, GetModuleHandle(NULL));
-        return;
+    if (g_hInitEvent) {
+        WaitForSingleObject(g_hInitEvent, INFINITE);
+        CloseHandle(g_hInitEvent);
+        g_hInitEvent = NULL;
     }
-
-    g_hWnd = CreateWindowEx(
-        0, MOD_WINDOW_CLASS, L"ModernIdleSleep", WS_OVERLAPPED,
-        0, 0, 0, 0, NULL, NULL, GetModuleHandle(NULL), NULL);
 
     if (!g_hWnd) {
-        Wh_Log(L"[EntryPoint] CreateWindowEx failed: %lu", GetLastError());
-        UnregisterClass(MOD_WINDOW_CLASS, GetModuleHandle(NULL));
-        UnregisterClass(BLACKOUT_WINDOW_CLASS, GetModuleHandle(NULL));
-        return;
+        Wh_Log(L"Worker thread initialization failed");
+        WaitForSingleObject(g_hThread, INFINITE);
+        CloseHandle(g_hThread);
+        g_hThread = NULL;
+        return FALSE;
     }
 
-    ShowWindow(g_hWnd, SW_HIDE);
-    Wh_Log(L"[EntryPoint] Hidden window created: HWND=%p", (void*)g_hWnd);
-
-    ChangeWindowMessageFilterEx(g_hWnd, WM_INPUT, MSGFLT_ALLOW, nullptr);
-
-    g_triggerMessage = RegisterWindowMessageW(TRIGGER_MESSAGE_NAME);
-    g_triggerMessageAlt = RegisterWindowMessageW(TRIGGER_MESSAGE_NAME_ALT);
-    if (g_triggerMessage || g_triggerMessageAlt) {
-        Wh_Log(L"[EntryPoint] External trigger messages registered: 0x%04X, 0x%04X",
-               g_triggerMessage, g_triggerMessageAlt);
-        if (g_triggerMessage) {
-            ChangeWindowMessageFilterEx(g_hWnd, g_triggerMessage, MSGFLT_ALLOW, nullptr);
-        }
-        if (g_triggerMessageAlt) {
-            ChangeWindowMessageFilterEx(g_hWnd, g_triggerMessageAlt, MSGFLT_ALLOW, nullptr);
-        }
-    }
-
-    g_lidNotify = RegisterPowerSettingNotification(
-        g_hWnd, &GUID_LIDSWITCH_STATE_CHANGE_LOCAL,
-        DEVICE_NOTIFY_WINDOW_HANDLE);
-
-    g_displayNotify = RegisterPowerSettingNotification(
-        g_hWnd, &GUID_CONSOLE_DISPLAY_STATE_LOCAL,
-        DEVICE_NOTIFY_WINDOW_HANDLE);
-
-    if (!g_displayNotify) {
-        Wh_Log(L"[EntryPoint] Display state notification registration failed: %lu; aborting",
-               GetLastError());
-        DestroyWindow(g_hWnd);
-        g_hWnd = NULL;
-        UnregisterClass(MOD_WINDOW_CLASS, GetModuleHandle(NULL));
-        UnregisterClass(BLACKOUT_WINDOW_CLASS, GetModuleHandle(NULL));
-        return;
-    }
-
-    RegisterPowerButtonRawInput();
-    UpdateTriggerHotkey();
-
-    Wh_Log(L"[EntryPoint] Listening. Hotkey, Lid, PowerButton and external message are active.");
-
-    MSG msg;
-    while (GetMessage(&msg, NULL, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
-    }
-
-    Wh_Log(L"[EntryPoint] Message loop exited; cleaning up");
-
-    DestroyBlackoutWindow();
-
-    if (g_lidNotify) {
-        UnregisterPowerSettingNotification(g_lidNotify);
-        g_lidNotify = NULL;
-    }
-    if (g_displayNotify) {
-        UnregisterPowerSettingNotification(g_displayNotify);
-        g_displayNotify = NULL;
-    }
-
-    UnregisterClass(MOD_WINDOW_CLASS, GetModuleHandle(NULL));
-    UnregisterClass(BLACKOUT_WINDOW_CLASS, GetModuleHandle(NULL));
-    g_hWnd = NULL;
-
-    Wh_Log(L"[EntryPoint] Exiting");
+    Wh_Log(L"=== Init complete ===");
+    return TRUE;
 }
 
 void WhTool_ModSettingsChanged() {
@@ -1351,7 +1387,7 @@ void WhTool_ModSettingsChanged() {
 }
 
 void WhTool_ModUninit() {
-    Wh_Log(L"=== Modern Standby Idle Sleep: Uninit ===");
+    Wh_Log(L"=== Turn Off Display Without Sleep: Uninit ===");
 
     g_shuttingDown.store(true);
 
@@ -1363,17 +1399,39 @@ void WhTool_ModUninit() {
         PostMessage(g_hWnd, WM_QUIT_THREAD, 0, 0);
     }
 
+    if (g_hThread) {
+        WaitForSingleObject(g_hThread, INFINITE);
+        CloseHandle(g_hThread);
+        g_hThread = NULL;
+    }
+
+    if (g_powerLockInitialized) {
+        DeleteCriticalSection(&g_powerLock);
+        g_powerLockInitialized = false;
+    }
+
     Wh_Log(L"=== Uninit complete ===");
 }
 
-// ─── Windhawk Tool Mod Boilerplate ──────────────────────────────────────────
+////////////////////////////////////////////////////////////////////////////////
+// Windhawk tool mod implementation for mods which don't need to inject to other
+// processes or hook other functions. Context:
+// https://github.com/ramensoftware/windhawk/wiki/Mods-as-tools:-Running-mods-in-a-dedicated-process
+//
+// The mod will load and run in a dedicated windhawk.exe process.
+//
+// Paste the code below as part of the mod code, and use these callbacks:
+// * WhTool_ModInit
+// * WhTool_ModSettingsChanged
+// * WhTool_ModUninit
+//
+// Currently, other callbacks are not supported.
 
 bool g_isToolModProcessLauncher;
 HANDLE g_toolModProcessMutex;
 
 void WINAPI EntryPoint_Hook() {
     Wh_Log(L">");
-    WhTool_ModEntryPoint();
     ExitThread(0);
 }
 
@@ -1428,7 +1486,7 @@ BOOL Wh_ModInit() {
         }
 
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
-            Wh_Log(L"Tool mod already running (%ls)", WH_MOD_ID);
+            Wh_Log(L"Tool mod already running (%s)", WH_MOD_ID);
             ExitProcess(1);
         }
 
@@ -1463,7 +1521,7 @@ void Wh_ModAfterInit() {
 
     WCHAR currentProcessPath[MAX_PATH];
     switch (GetModuleFileName(nullptr, currentProcessPath,
-                               ARRAYSIZE(currentProcessPath))) {
+                              ARRAYSIZE(currentProcessPath))) {
         case 0:
         case ARRAYSIZE(currentProcessPath):
             Wh_Log(L"GetModuleFileName failed");
@@ -1473,8 +1531,8 @@ void Wh_ModAfterInit() {
     WCHAR
     commandLine[MAX_PATH + 2 +
                 (sizeof(L" -tool-mod \"" WH_MOD_ID "\"") / sizeof(WCHAR)) - 1];
-    swprintf(commandLine, ARRAYSIZE(commandLine),
-             L"\"%ls\" -tool-mod \"%ls\"", currentProcessPath, WH_MOD_ID);
+    swprintf_s(commandLine, L"\"%s\" -tool-mod \"%s\"", currentProcessPath,
+               WH_MOD_ID);
 
     HMODULE kernelModule = GetModuleHandle(L"kernelbase.dll");
     if (!kernelModule) {
@@ -1501,10 +1559,10 @@ void Wh_ModAfterInit() {
         return;
     }
 
-    STARTUPINFO si{};
-    si.cb = sizeof(STARTUPINFO);
-    si.dwFlags = STARTF_FORCEOFFFEEDBACK;
-
+    STARTUPINFO si{
+        .cb = sizeof(STARTUPINFO),
+        .dwFlags = STARTF_FORCEOFFFEEDBACK,
+    };
     PROCESS_INFORMATION pi;
     if (!pCreateProcessInternalW(nullptr, currentProcessPath, commandLine,
                                  nullptr, nullptr, FALSE, NORMAL_PRIORITY_CLASS,
