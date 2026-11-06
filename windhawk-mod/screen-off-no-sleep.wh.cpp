@@ -4,13 +4,14 @@
 // @description     Turns the display off cleanly without entering Modern Standby sleep, keeping background audio playback, downloads, and mobile hotspots alive.
 // @version         1.0.0
 // @author          mirukurusan
-// @github          https://github.com/mirukurusan/screen-off-no-sleep
+// @github          https://github.com/mirukurusan
+// @homepage        https://github.com/mirukurusan/screen-off-no-sleep
+// @license         MIT
 // @include         windhawk-mod-uiaccess.exe
 // @include         windhawk-mod-elevated.exe
 // @include         windhawk-mod.exe
 // @include         windhawk.exe
 // @compilerOptions -lpowrprof -luser32 -lhid -lgdi32
-// @license         MIT
 // ==/WindhawkMod==
 
 // ==WindhawkModReadme==
