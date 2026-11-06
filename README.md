@@ -37,6 +37,7 @@ The mod acts as a state machine managing display timeouts and visual overlays:
          │
          ▼
 [ Step 2: Dynamic 1-Second Timeout Injection ]
+  • Saves the active scheme GUID and current AC/DC timeouts to mod storage.
   • Dynamically writes VIDEOIDLE = 1 s to the active Windows power scheme.
   • Because the user is not touching mouse/keyboard, Windows PDC marks the system
     as qualifying for a natural "Video Idle Timeout" ([firmware notification](https://learn.microsoft.com/en-us/windows-hardware/design/device-experiences/modern-standby-firmware-notifications)).
@@ -48,7 +49,7 @@ The mod acts as a state machine managing display timeouts and visual overlays:
          │
          ▼
 [ Step 4: State Restoration & Optional Silent Lock ]
-  • Restores original / configured display timeout back into the power scheme.
+  • Restores the exact captured AC/DC timeouts back into the power scheme and clears storage.
   • Dismisses the blackout overlay window.
   • Optional: Silently locks workstation in the dark (LockOnIdleSleep = true),
     or keeps active desktop for immediate return upon wake (LockOnIdleSleep = false).
@@ -62,6 +63,8 @@ The mod acts as a state machine managing display timeouts and visual overlays:
    Display controllers, TCONs, and GPU driver pipes often take 1–2 seconds to complete an idle power-down sequence. The mod instantly displays a pitch-black `WS_EX_TOPMOST` window so the display appears turned off immediately upon user input.
 3. **Failsafe Watchdog**:
    If an unexpected user action (e.g. accidental mouse shake) interrupts the idle state before hardware display-off arrives, a 3-second watchdog timer cleans up the overlay and restores original power timeouts automatically.
+4. **Crash-Resilient State Restoration**:
+   Before injecting the 1-second timeout, the mod snapshots the active power plan GUID and current AC/DC timeouts into mod storage (`Wh_SetBinaryValue`). The original values are restored and cleared once hardware display-off is confirmed. If the system or tool process terminates mid-flow (e.g. power loss or crash), the original timeout is automatically recovered upon the next startup.
 
 ---
 
@@ -112,8 +115,6 @@ The mod provides configurable options in the Windhawk Mod Settings UI:
 * **Lock workstation after display turns off (`LockOnIdleSleep`)** *(Default: `false`)*:
   * `false`: Display powers down while keeping desktop unlocked. Waking up immediately returns to your open applications.
   * `true`: Silently locks the workstation in the dark once the display powers down, requiring PIN/Windows Hello on wake.
-* **Default display-off timeout (`SafeIdleTimeout`)** *(Default: `original`)*:
-  * Timeout restored during normal operation and immediately following display-off. `original` keeps your system's existing power plan timeout.
 * **Trigger hotkey (`TriggerHotkey`)** *(Default: `Win+Alt+L`)*:
   * Global system-wide shortcut to turn off the display instantly.
 * **Turn off display on lid close (`HandleLidClose`)** *(Default: `true`)*:

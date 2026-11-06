@@ -82,7 +82,6 @@ powercfg /setactive SCHEME_CURRENT
 ## Settings
 
 - **Lock workstation after display turns off**: Silently lock in the dark after screen is off.
-- **Default display-off timeout**: Safe display timeout restored after turn-off.
 - **Trigger hotkey**: Global hotkey to turn off display (default `Win+Alt+L`).
 - **Turn off display on lid close**: Trigger when laptop lid closes.
 - **Turn off display on power button (HID devices)**: Capture HID power button events.
@@ -94,16 +93,6 @@ powercfg /setactive SCHEME_CURRENT
 - LockOnIdleSleep: false
   $name: Lock workstation after display turns off
   $description: "If enabled, locks the workstation silently in the dark after the display powers off (requiring PIN/Windows Hello on wake). If disabled, waking returns directly to your active desktop."
-- SafeIdleTimeout: "original"
-  $name: Default display-off timeout
-  $description: "Display idle timeout applied during normal operation and restored immediately after the screen turns off. 'Keep system power plan setting' preserves your existing power configuration."
-  $options:
-  - original: Keep system power plan setting (recommended)
-  - never: Never turn off display automatically
-  - 60sec: 1 minute
-  - 180sec: 3 minutes
-  - 300sec: 5 minutes
-  - 600sec: 10 minutes
 - TriggerHotkey: "Win+Alt+L"
   $name: Trigger hotkey
   $description: "Global keyboard shortcut to turn off display (e.g. Win+Alt+L). Leave empty to disable."
@@ -186,10 +175,6 @@ static const UINT WATCHDOG_TIMEOUT_MS = 3000;
 // transition; it is the gesture that woke the device.
 static const ULONGLONG WAKE_GUARD_MS = 1500;
 
-// Values between 1 and 9 are considered leftover injection contamination.
-// 0 and 0xFFFFFFFF mean "never turn off", which is a valid configuration.
-static const DWORD MIN_SAFE_ORIGINAL_SECONDS = 10;
-
 static const wchar_t* MOD_WINDOW_CLASS = L"WindhawkModernIdleSleep";
 static const wchar_t* BLACKOUT_WINDOW_CLASS = L"WindhawkModernIdleSleepBlackout";
 static const wchar_t* TRIGGER_MESSAGE_NAME = L"WindhawkModernIdleSleep_Trigger";
@@ -200,9 +185,18 @@ static const UINT WM_QUIT_THREAD = WM_USER + 101;
 
 // ─── Global State ────────────────────────────────────────────────────────────
 
+#pragma pack(push, 1)
+struct SavedPowerState {
+    GUID scheme;
+    DWORD acTimeout;
+    DWORD dcTimeout;
+};
+#pragma pack(pop)
+
+static const wchar_t* SAVED_POWER_STATE_VALUE = L"SavedPowerState";
+
 // Settings
 static std::atomic<bool> g_lockOnIdleSleep{false};
-static std::atomic<int> g_safeTimeoutConfig{ -1 }; // -1 = keep original, 0 = never, >0 = seconds
 static std::atomic<bool> g_handleLidClose{true};
 static std::atomic<bool> g_handlePowerButton{true};
 static std::atomic<bool> g_shuttingDown{false};
@@ -211,17 +205,9 @@ static std::atomic<bool> g_shuttingDown{false};
 static CRITICAL_SECTION g_powerLock;
 static bool g_powerLockInitialized = false;
 
-// The scheme which was active when the mod started, and the values found there.
-static GUID g_initScheme = {};
-static bool g_initSchemeValid = false;
-static DWORD g_originalAcTimeout = 0;
-static DWORD g_originalDcTimeout = 0;
-static bool g_haveOriginalTimeouts = false;
-
-// Flow state
+// Flow state: holds the snapshot taken right before 1-second injection
 static std::atomic<bool> g_flowActive{false};
-static GUID g_flowScheme = {};
-static bool g_flowSchemeValid = false;
+static SavedPowerState g_flowSavedState = {};
 
 // Entry-thread state
 static HWND g_hWnd = NULL;
@@ -315,31 +301,6 @@ static void ApplySchemeIfActiveNoLock(const GUID& scheme) {
     }
 }
 
-static bool IsOriginalTimeoutSafe(DWORD seconds) {
-    // 0 and 0xFFFFFFFF mean "never turn off", which is completely safe.
-    // 1-9 s is leftover injection from an earlier crash.
-    return seconds == 0 || seconds == 0xFFFFFFFF || seconds >= MIN_SAFE_ORIGINAL_SECONDS;
-}
-
-// Helper to determine what timeout values to apply as "safe/normal"
-static void GetDesiredSafeTimeoutValues(DWORD* acOut, DWORD* dcOut) {
-    int cfg = g_safeTimeoutConfig.load();
-    if (cfg >= 0) {
-        // User explicitly picked a value: 0=never, 60, 180, 300, 600
-        *acOut = (DWORD)cfg;
-        *dcOut = (DWORD)cfg;
-    } else {
-        // 'original' mode: use original timeouts if available and safe, else 300s fallback
-        DWORD ac = 300;
-        DWORD dc = 300;
-        if (g_haveOriginalTimeouts) {
-            ac = IsOriginalTimeoutSafe(g_originalAcTimeout) ? g_originalAcTimeout : 300;
-            dc = IsOriginalTimeoutSafe(g_originalDcTimeout) ? g_originalDcTimeout : 300;
-        }
-        *acOut = ac;
-        *dcOut = dc;
-    }
-}
 
 // ─── Blackout Overlay Window ─────────────────────────────────────────────────
 
@@ -403,114 +364,43 @@ static void DestroyBlackoutWindow() {
 
 // ─── Settings ────────────────────────────────────────────────────────────────
 
-static int ParseTimeoutOption(PCWSTR option) {
-    if (!option) {
-        return -1;
-    }
-    if (wcscmp(option, L"original") == 0) return -1;
-    if (wcscmp(option, L"never") == 0)    return 0;
-    if (wcscmp(option, L"60sec") == 0)    return 60;
-    if (wcscmp(option, L"180sec") == 0)   return 180;
-    if (wcscmp(option, L"300sec") == 0)   return 300;
-    if (wcscmp(option, L"600sec") == 0)   return 600;
-    return -1;
-}
-
 static void LoadSettings() {
     g_lockOnIdleSleep.store(Wh_GetIntSetting(L"LockOnIdleSleep") != 0);
-
-    PCWSTR safeStr = Wh_GetStringSetting(L"SafeIdleTimeout");
-    int safe = ParseTimeoutOption(safeStr);
-    if (safeStr) {
-        Wh_FreeStringSetting(safeStr);
-    }
-    g_safeTimeoutConfig.store(safe);
-
     g_handleLidClose.store(Wh_GetIntSetting(L"HandleLidClose") != 0);
     g_handlePowerButton.store(Wh_GetIntSetting(L"HandlePowerButton") != 0);
 
-    Wh_Log(L"Settings: LockOnIdleSleep=%d, SafeIdleTimeout=%d, HandleLidClose=%d, "
-           L"HandlePowerButton=%d",
-           (int)g_lockOnIdleSleep.load(), safe, (int)g_handleLidClose.load(),
+    Wh_Log(L"Settings: LockOnIdleSleep=%d, HandleLidClose=%d, HandlePowerButton=%d",
+           (int)g_lockOnIdleSleep.load(), (int)g_handleLidClose.load(),
            (int)g_handlePowerButton.load());
 }
 
-// ─── Power Scheme Helpers ────────────────────────────────────────────────────
+// ─── Power Scheme Recovery & Flow State ──────────────────────────────────────
 
-static void ApplySafeTimeoutIfIdle(const wchar_t* reason) {
+// Must be called with g_powerLock held.
+static void ClearPowerStateRecordNoLock() {
+    Wh_DeleteValue(SAVED_POWER_STATE_VALUE);
+}
+
+// Check for and recover any leftover 1-second timeout from a previous unclean shutdown / crash.
+static void RecoverSavedPowerState() {
     EnterCriticalSection(&g_powerLock);
 
-    if (g_shuttingDown.load() || g_flowActive.load()) {
-        LeaveCriticalSection(&g_powerLock);
-        Wh_Log(L"Skipping safe-timeout application (%ls): shutting down or busy",
-               reason);
-        return;
-    }
+    SavedPowerState state = {};
+    if (Wh_GetBinaryValue(SAVED_POWER_STATE_VALUE, &state, sizeof(state)) == sizeof(SavedPowerState)) {
+        Wh_Log(L"Found leftover power state from unclean shutdown; restoring AC=%lu s, DC=%lu s",
+               state.acTimeout, state.dcTimeout);
 
-    GUID active = {};
-    if (GetActiveSchemeGuidNoLock(&active)) {
-        DWORD ac = 0, dc = 0;
-        GetDesiredSafeTimeoutValues(&ac, &dc);
-
-        WriteResult result = WriteTimeoutValuesNoLock(active, ac, dc);
+        WriteResult result = WriteTimeoutValuesNoLock(state.scheme, state.acTimeout, state.dcTimeout);
         if (result.acOk || result.dcOk) {
-            ApplySchemeIfActiveNoLock(active);
+            ApplySchemeIfActiveNoLock(state.scheme);
         }
-        Wh_Log(L"Applied safe timeout: AC=%lu s, DC=%lu s (%ls, AC ok=%d, DC ok=%d)",
-               ac, dc, reason, result.acOk, result.dcOk);
+        ClearPowerStateRecordNoLock();
     }
 
     LeaveCriticalSection(&g_powerLock);
 }
 
-static bool InitializePowerScheme() {
-    EnterCriticalSection(&g_powerLock);
-
-    bool ok = false;
-    GUID active = {};
-    if (GetActiveSchemeGuidNoLock(&active)) {
-        g_initScheme = active;
-        g_initSchemeValid = true;
-
-        DWORD acValue = 0;
-        DWORD dcValue = 0;
-        DWORD acErr = PowerReadACValueIndex(
-            nullptr, &active, &GUID_VIDEO_SUBGROUP_LOCAL,
-            &GUID_VIDEO_IDLE_TIMEOUT_LOCAL, &acValue);
-        DWORD dcErr = PowerReadDCValueIndex(
-            nullptr, &active, &GUID_VIDEO_SUBGROUP_LOCAL,
-            &GUID_VIDEO_IDLE_TIMEOUT_LOCAL, &dcValue);
-
-        if (acErr == ERROR_SUCCESS && dcErr == ERROR_SUCCESS) {
-            g_originalAcTimeout = acValue;
-            g_originalDcTimeout = dcValue;
-            g_haveOriginalTimeouts = true;
-            Wh_Log(L"Original VIDEOIDLE: AC=%lu s, DC=%lu s", acValue, dcValue);
-            if (!IsOriginalTimeoutSafe(acValue) || !IsOriginalTimeoutSafe(dcValue)) {
-                Wh_Log(L"WARNING: suspiciously short VIDEOIDLE found (AC=%lu, DC=%lu); "
-                       L"likely leftover contamination.", acValue, dcValue);
-            }
-        } else {
-            Wh_Log(L"Could not read original VIDEOIDLE (AC err=%lu, DC err=%lu)",
-                   acErr, dcErr);
-        }
-
-        DWORD ac = 0, dc = 0;
-        GetDesiredSafeTimeoutValues(&ac, &dc);
-        WriteResult result = WriteTimeoutValuesNoLock(active, ac, dc);
-        ok = (result.acOk || result.dcOk);
-        if (ok) {
-            ApplySchemeIfActiveNoLock(active);
-        }
-        Wh_Log(L"Initial safe timeout applied: AC=%lu s, DC=%lu s (AC ok=%d, DC ok=%d)",
-               ac, dc, result.acOk, result.dcOk);
-    }
-
-    LeaveCriticalSection(&g_powerLock);
-    return ok;
-}
-
-static bool InjectOneSecondTimeout(GUID* schemeOut) {
+static bool InjectOneSecondTimeout() {
     EnterCriticalSection(&g_powerLock);
 
     if (g_shuttingDown.load()) {
@@ -530,25 +420,67 @@ static bool InjectOneSecondTimeout(GUID* schemeOut) {
         return false;
     }
 
+    DWORD currentAc = 0;
+    DWORD currentDc = 0;
+    DWORD acErr = PowerReadACValueIndex(
+        nullptr, &active, &GUID_VIDEO_SUBGROUP_LOCAL,
+        &GUID_VIDEO_IDLE_TIMEOUT_LOCAL, &currentAc);
+    DWORD dcErr = PowerReadDCValueIndex(
+        nullptr, &active, &GUID_VIDEO_SUBGROUP_LOCAL,
+        &GUID_VIDEO_IDLE_TIMEOUT_LOCAL, &currentDc);
+
+    if (acErr != ERROR_SUCCESS || dcErr != ERROR_SUCCESS) {
+        Wh_Log(L"Failed to read current VIDEOIDLE (AC err=%lu, DC err=%lu); aborting injection",
+               acErr, dcErr);
+        LeaveCriticalSection(&g_powerLock);
+        return false;
+    }
+
+    // Persist to mod storage before writing 1 second so an unclean exit can recover.
+    SavedPowerState state = { active, currentAc, currentDc };
+    if (!Wh_SetBinaryValue(SAVED_POWER_STATE_VALUE, &state, sizeof(state))) {
+        Wh_Log(L"Failed to record power state to mod storage; aborting injection");
+        LeaveCriticalSection(&g_powerLock);
+        return false;
+    }
+
     WriteResult result = WriteTimeoutValuesNoLock(active, 1, 1);
     if (!result.acOk && !result.dcOk) {
-        LeaveCriticalSection(&g_powerLock);
+        ClearPowerStateRecordNoLock();
         Wh_Log(L"Failed to write the 1-second display-off timeout");
+        LeaveCriticalSection(&g_powerLock);
         return false;
     }
 
     ApplySchemeIfActiveNoLock(active);
 
-    g_flowScheme = active;
-    g_flowSchemeValid = true;
+    g_flowSavedState = state;
     g_flowActive.store(true);
-
-    *schemeOut = active;
 
     LeaveCriticalSection(&g_powerLock);
 
-    Wh_Log(L"Injected VIDEOIDLE=1 s (AC ok=%d, DC ok=%d)", result.acOk, result.dcOk);
+    Wh_Log(L"Injected VIDEOIDLE=1 s (saved AC=%lu s, DC=%lu s, AC ok=%d, DC ok=%d)",
+           currentAc, currentDc, result.acOk, result.dcOk);
     return true;
+}
+
+// Must be called with g_powerLock held.
+static void RestoreFlowSafeTimeoutNoLock() {
+    if (!g_flowActive.load()) {
+        return;
+    }
+
+    SavedPowerState state = g_flowSavedState;
+    g_flowActive.store(false);
+
+    WriteResult result = WriteTimeoutValuesNoLock(state.scheme, state.acTimeout, state.dcTimeout);
+    if (result.acOk || result.dcOk) {
+        ApplySchemeIfActiveNoLock(state.scheme);
+    }
+    ClearPowerStateRecordNoLock();
+
+    Wh_Log(L"Restored VIDEOIDLE: AC=%lu s, DC=%lu s (AC ok=%d, DC ok=%d)",
+           state.acTimeout, state.dcTimeout, result.acOk, result.dcOk);
 }
 
 static void RestoreFlowSafeTimeout() {
@@ -557,69 +489,17 @@ static void RestoreFlowSafeTimeout() {
     }
 
     EnterCriticalSection(&g_powerLock);
-
-    if (!g_flowActive.load()) {
-        LeaveCriticalSection(&g_powerLock);
-        return;
-    }
-
-    GUID scheme = {};
-    bool haveScheme = false;
-    if (g_flowSchemeValid) {
-        scheme = g_flowScheme;
-        haveScheme = true;
-    } else {
-        haveScheme = GetActiveSchemeGuidNoLock(&scheme);
-    }
-
-    g_flowActive.store(false);
-    g_flowSchemeValid = false;
-
-    if (haveScheme) {
-        DWORD ac = 0, dc = 0;
-        GetDesiredSafeTimeoutValues(&ac, &dc);
-
-        WriteResult result = WriteTimeoutValuesNoLock(scheme, ac, dc);
-        if (result.acOk || result.dcOk) {
-            ApplySchemeIfActiveNoLock(scheme);
-        }
-        Wh_Log(L"Restored VIDEOIDLE: AC=%lu s, DC=%lu s (AC ok=%d, DC ok=%d)",
-               ac, dc, result.acOk, result.dcOk);
-    }
-
+    RestoreFlowSafeTimeoutNoLock();
     LeaveCriticalSection(&g_powerLock);
 }
 
 static void RestoreOnUninit() {
     EnterCriticalSection(&g_powerLock);
 
-    DWORD defAc = 300, defDc = 300;
-    GetDesiredSafeTimeoutValues(&defAc, &defDc);
-
-    if (g_flowActive.load() && g_flowSchemeValid) {
-        Wh_Log(L"Uninit during active flow; clearing 1-second value");
-        WriteTimeoutValuesNoLock(g_flowScheme, defAc, defDc);
-        ApplySchemeIfActiveNoLock(g_flowScheme);
+    if (g_flowActive.load()) {
+        Wh_Log(L"Uninit during active flow; restoring saved power state");
+        RestoreFlowSafeTimeoutNoLock();
     }
-
-    if (g_initSchemeValid) {
-        DWORD ac = defAc;
-        DWORD dc = defDc;
-        if (g_haveOriginalTimeouts) {
-            ac = IsOriginalTimeoutSafe(g_originalAcTimeout) ? g_originalAcTimeout : defAc;
-            dc = IsOriginalTimeoutSafe(g_originalDcTimeout) ? g_originalDcTimeout : defDc;
-        }
-
-        WriteResult result = WriteTimeoutValuesNoLock(g_initScheme, ac, dc);
-        if (result.acOk || result.dcOk) {
-            ApplySchemeIfActiveNoLock(g_initScheme);
-        }
-        Wh_Log(L"Uninit restored VIDEOIDLE: AC=%lu s, DC=%lu s (AC ok=%d, DC ok=%d)",
-               ac, dc, result.acOk, result.dcOk);
-    }
-
-    g_flowActive.store(false);
-    g_flowSchemeValid = false;
 
     LeaveCriticalSection(&g_powerLock);
 }
@@ -1059,8 +939,7 @@ static void TriggerFlow(int source) {
     ShowBlackoutWindow();
 
     // 2. Inject temporary 1-second VIDEOIDLE timeout
-    GUID scheme = {};
-    if (!InjectOneSecondTimeout(&scheme)) {
+    if (!InjectOneSecondTimeout()) {
         Wh_Log(L"Flow aborted before timeout injection");
         DestroyBlackoutWindow();
         return;
@@ -1248,7 +1127,6 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             Wh_Log(L"Reloading settings");
             LoadSettings();
             UpdateTriggerHotkey();
-            ApplySafeTimeoutIfIdle(L"settings change");
             return 0;
         }
 
@@ -1334,17 +1212,15 @@ static void LogNativeActionWarnings() {
 // ─── Windhawk Tool-Mod Callbacks ────────────────────────────────────────────
 
 BOOL WhTool_ModInit() {
-    Wh_Log(L"=== Turn Off Display Without Sleep v2.0.0: Init ===");
+    Wh_Log(L"=== Turn Off Display Without Sleep: Init ===");
 
     InitializeCriticalSection(&g_powerLock);
     g_powerLockInitialized = true;
 
     LoadSettings();
 
-    if (!InitializePowerScheme()) {
-        Wh_Log(L"Cannot write VIDEOIDLE to the active power scheme; refusing to activate");
-        return FALSE;
-    }
+    // Check if an earlier run ended mid-flow and recover original power scheme timeout.
+    RecoverSavedPowerState();
 
     LogNativeActionWarnings();
 
@@ -1471,8 +1347,6 @@ void WhTool_ModSettingsChanged() {
 
     if (g_hWnd) {
         PostMessage(g_hWnd, WM_RELOAD_SETTINGS, 0, 0);
-    } else {
-        ApplySafeTimeoutIfIdle(L"settings change");
     }
 }
 
