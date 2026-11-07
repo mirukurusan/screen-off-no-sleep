@@ -166,10 +166,10 @@ The mod provides configurable options in the Windhawk Mod Settings UI:
   * `true`: Silently locks the workstation in the dark once the display powers down, requiring PIN/Windows Hello on wake.
 * **Trigger hotkey (`TriggerHotkey`)** *(Default: `Win+Alt+L`)*:
   * Global system-wide shortcut to turn off the display instantly.
-* **Turn off display on lid close (`HandleLidClose`)** *(Default: `true`)*:
-  * Triggers display-off immediately when the laptop lid is closed (requires native lid action set to "Do nothing").
-* **Turn off display on power button (`HandlePowerButton`)** *(Default: `true`)*:
-  * Listens for HID button events on Surface and compatible 2-in-1 devices.
+* **Turn off display on lid close (`HandleLidClose`)** *(Default: `false`)*:
+  * Triggers display-off immediately when the laptop lid is closed (requires enabling this option and setting native lid action to "Do nothing").
+* **Turn off display on power button (`HandlePowerButton`)** *(Default: `false`)*:
+  * Listens for HID button events on Surface and compatible 2-in-1 devices (requires enabling this option and setting native power button action to "Do nothing").
 
 ---
 

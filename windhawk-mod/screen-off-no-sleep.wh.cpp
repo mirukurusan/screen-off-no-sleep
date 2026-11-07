@@ -46,10 +46,10 @@ Standby keeps audio streams, downloads, and mobile hotspots running indefinitely
 
 ---
 
-## Prerequisites (Important)
+## Prerequisites
 
-Windows native power button and lid actions must not trigger a native sleep action before
-this mod takes over. Set both to **Do nothing** for AC and DC.
+To allow this mod to take control of lid-close or power button events, Windows native actions 
+must be set to "Do nothing" (0) so Windows does not trigger its built-in sleep transition.
 
 Run this in an elevated Command Prompt:
 ```cmd
@@ -60,20 +60,17 @@ powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0
 powercfg /setactive SCHEME_CURRENT
 ```
 
-> **Note**: Setting the native action to "Do nothing" ensures Windows does not initiate
-> a system sleep transition before this mod takes over.
-
 ---
 
 ## Triggers
 
 - **Keyboard Shortcut**: Default is `Win+Alt+L`. Customizable in settings.
-- **Lid Close**: Triggered automatically when closing the laptop lid (when set to "Do nothing").
+- **Lid Close**: Triggered automatically when closing the laptop lid. Requires native lid 
+  close action set to "Do nothing".
 - **Power Button**: Supported on devices where the power button is exposed via HID System Control
-  (Usage Page `0x01`, Usages `0x80`/`0x81`/`0x82`, such as Microsoft Surface).
-  *Note for traditional laptops (e.g. ThinkPad / Lenovo / Dell / HP with ACPI buttons)*:
-  When the button action is set to "Do nothing", the ACPI driver silently discards button interrupts
-  before user-mode software can see them. On these laptops, please use the **Trigger hotkey** or **Lid close**.
+  (Usage Page `0x01`, Usages `0x80`/`0x81`/`0x82`, such as Microsoft Surface Pro). Requires native 
+  power button action set to "Do nothing". 
+  Not detectable on laptops with ACPI-only power buttons, use Trigger hotkey or Lid close instead.
 - **External Window Message**: Broadcast `WindhawkScreenOffNoSleep_Trigger` from external scripts or taskbar shortcuts.
 
 ---
@@ -95,12 +92,12 @@ powercfg /setactive SCHEME_CURRENT
 - TriggerHotkey: "Win+Alt+L"
   $name: Trigger hotkey
   $description: "Global keyboard shortcut to turn off display (e.g. Win+Alt+L). Leave empty to disable."
-- HandleLidClose: true
+- HandleLidClose: false
   $name: Turn off display on lid close
   $description: "Trigger display-off immediately when laptop lid closes. Requires native lid action set to 'Do nothing'."
-- HandlePowerButton: true
+- HandlePowerButton: false
   $name: Turn off display on power button (HID devices)
-  $description: "Trigger display-off when pressing the hardware power button on devices that expose it via HID. Requires native power button action set to 'Do nothing'. Note: Not detectable on laptops with ACPI-only power buttons; use Trigger hotkey or Lid close instead."
+  $description: "Trigger display-off when pressing the hardware power button on devices that expose it via HID. Requires native power button action set to 'Do nothing'. Note: Not detectable on laptops with ACPI-only power buttons, use Trigger hotkey or Lid close instead."
 */
 // ==/WindhawkModSettings==
 
@@ -195,8 +192,8 @@ static const wchar_t* SAVED_POWER_STATE_VALUE = L"SavedPowerState";
 
 // Settings
 static std::atomic<bool> g_lockOnScreenOff{false};
-static std::atomic<bool> g_handleLidClose{true};
-static std::atomic<bool> g_handlePowerButton{true};
+static std::atomic<bool> g_handleLidClose{false};
+static std::atomic<bool> g_handlePowerButton{false};
 static std::atomic<bool> g_shuttingDown{false};
 
 // Power-scheme serialization
