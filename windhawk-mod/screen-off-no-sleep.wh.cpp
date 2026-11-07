@@ -8,6 +8,7 @@
 // @homepage        https://github.com/mirukurusan/screen-off-no-sleep
 // @license         MIT
 // @include         windhawk-mod-uiaccess.exe
+// @include         windhawk-mod.exe
 // @include         windhawk.exe
 // @compilerOptions -lpowrprof -luser32 -lhid -lgdi32
 // ==/WindhawkMod==
