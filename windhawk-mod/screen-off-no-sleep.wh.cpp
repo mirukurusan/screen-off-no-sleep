@@ -368,7 +368,6 @@ static void ShowBlackoutWindow() {
     if (g_hBlackoutWnd) {
         SetWindowPos(g_hBlackoutWnd, HWND_TOPMOST, x, y, cx, cy,
                      SWP_SHOWWINDOW | SWP_NOACTIVATE);
-        ShowWindow(g_hBlackoutWnd, SW_SHOWNOACTIVATE);
         UpdateWindow(g_hBlackoutWnd);
         Wh_Log(L"Blackout overlay displayed (instant visual blackout)");
     }
@@ -893,7 +892,7 @@ static void UpdateTriggerHotkey() {
     }
 
     auto hotkeySetting = WindhawkUtils::StringSetting::make(L"TriggerHotkey");
-    std::wstring text = hotkeySetting.get() ? hotkeySetting.get() : L"";
+    std::wstring text = hotkeySetting.get();
 
     if (text.empty()) {
         Wh_Log(L"Trigger hotkey disabled (empty setting)");
@@ -1377,22 +1376,22 @@ BOOL WhTool_ModInit() {
     g_lidStateInitialized = false;
 
     g_hInitEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+    if (!g_hInitEvent) {
+        Wh_Log(L"CreateEvent failed: %lu", GetLastError());
+        return FALSE;
+    }
 
     g_hThread = CreateThread(nullptr, 0, ToolModThreadProc, nullptr, 0, nullptr);
     if (!g_hThread) {
         Wh_Log(L"CreateThread failed: %lu", GetLastError());
-        if (g_hInitEvent) {
-            CloseHandle(g_hInitEvent);
-            g_hInitEvent = NULL;
-        }
+        CloseHandle(g_hInitEvent);
+        g_hInitEvent = NULL;
         return FALSE;
     }
 
-    if (g_hInitEvent) {
-        WaitForSingleObject(g_hInitEvent, INFINITE);
-        CloseHandle(g_hInitEvent);
-        g_hInitEvent = NULL;
-    }
+    WaitForSingleObject(g_hInitEvent, INFINITE);
+    CloseHandle(g_hInitEvent);
+    g_hInitEvent = NULL;
 
     if (!g_hWnd) {
         Wh_Log(L"Worker thread initialization failed");
