@@ -313,6 +313,9 @@ static LRESULT CALLBACK BlackoutWndProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             return 0;
         }
 
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+
         case WM_NCHITTEST:
             return HTCLIENT;
     }
@@ -330,16 +333,17 @@ static void ShowBlackoutWindow() {
     int cy = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
     g_hBlackoutWnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         BLACKOUT_WINDOW_CLASS,
         L"",
-        WS_POPUP | WS_VISIBLE,
+        WS_POPUP,
         x, y, cx, cy,
         NULL, NULL, GetModuleHandle(NULL), NULL);
 
     if (g_hBlackoutWnd) {
         SetWindowPos(g_hBlackoutWnd, HWND_TOPMOST, x, y, cx, cy,
                      SWP_SHOWWINDOW | SWP_NOACTIVATE);
+        ShowWindow(g_hBlackoutWnd, SW_SHOWNOACTIVATE);
         UpdateWindow(g_hBlackoutWnd);
         Wh_Log(L"Blackout overlay displayed (instant visual blackout)");
     }
