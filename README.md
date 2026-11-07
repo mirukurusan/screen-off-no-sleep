@@ -31,7 +31,7 @@ The mod acts as a state machine managing display timeouts and visual overlays:
   └── Window Message (WindhawkScreenOffNoSleep_Trigger)
          │
          ▼
-[ Step 1: 0 ms Instant Blackout Overlay ]
+[ Step 1: Instant Blackout Overlay ]
   • Displays a topmost, black, frameless window covering all monitors (SM_XVIRTUALSCREEN).
   • Provides instant visual feedback with zero perceptible latency.
          │
@@ -59,7 +59,7 @@ The mod acts as a state machine managing display timeouts and visual overlays:
 
 1. **Active Desktop Compatibility (No Forced Lock Screen)**:
    Earlier approaches relied on `GUID_VIDEO_CONSOLE_LOCK_TIMEOUT_LOCAL` (`VIDEOCONLOCK`), which required locking the workstation first. This mod targets `GUID_VIDEO_IDLE_TIMEOUT_LOCAL` (`VIDEOIDLE`), allowing the user to turn off the display and wake straight back to their working desktop with no password or PIN delay.
-2. **0 ms Visual Blackout**:
+2. **Instant Visual Blackout**:
    Display controllers, TCONs, and GPU driver pipes often take 1–2 seconds to complete an idle power-down sequence. The mod instantly displays a pitch-black `WS_EX_TOPMOST` window so the display appears turned off immediately upon user input.
 3. **Failsafe Watchdog**:
    If an unexpected user action (e.g. accidental mouse shake) interrupts the idle state before hardware display-off arrives, a 3-second watchdog timer cleans up the overlay and restores original power timeouts automatically.
@@ -120,15 +120,14 @@ The mod supports multiple activation methods:
 ## 4. Hardware Button Handling & Privilege Isolation (UIPI)
 
 ### The Privilege Challenge (UIPI & UIAccess)
-By default, Windhawk tool mods run at the interactive user's standard integrity level. When an elevated application (such as an Administrator Command Prompt, PowerShell, or Task Manager) holds foreground focus, Windows **UIPI (User Interface Privilege Isolation)** in `win32k.sys` drops background raw input sink (`RIDEV_INPUTSINK`) messages to prevent unauthorized input monitoring.
+By default, Windhawk tool mods run at the interactive user's standard integrity level. When an elevated application (such as an Administrator Command Prompt, PowerShell, or Task Manager) holds foreground focus, Windows **UIPI (User Interface Privilege Isolation)** in `win32k.sys` drops background raw input sink (`RIDEV_INPUTSINK`) messages to prevent unauthorized input monitoring. Furthermore, standard-integrity windows cannot reliably overlay elevated windows or system surfaces.
 
 This mod solves this by targeting Windhawk's **`windhawk-mod-uiaccess.exe`** execution host:
 ```cpp
 // @include         windhawk-mod-uiaccess.exe
-// @include         windhawk-mod-elevated.exe
-// @include         windhawk-mod.exe
+// @include         windhawk.exe
 ```
-With the `UIAccess` privilege, Windows permits the mod's background input sink to receive hardware button events even when an elevated administrator window is focused.
+With the `UIAccess` privilege, Windows permits the mod's background input sink to receive hardware button events even when an elevated administrator window is focused, while ensuring the blackout overlay can cleanly cover elevated windows and the Start menu without requiring full administrator elevation (`windhawk-mod-elevated.exe`).
 
 ### Hardware Button Implementations (Surface / 2-in-1s vs Clamshells)
 

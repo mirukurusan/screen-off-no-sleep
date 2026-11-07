@@ -8,8 +8,6 @@
 // @homepage        https://github.com/mirukurusan/screen-off-no-sleep
 // @license         MIT
 // @include         windhawk-mod-uiaccess.exe
-// @include         windhawk-mod-elevated.exe
-// @include         windhawk-mod.exe
 // @include         windhawk.exe
 // @compilerOptions -lpowrprof -luser32 -lhid -lgdi32
 // ==/WindhawkMod==
@@ -28,7 +26,7 @@ Standby keeps audio streams, downloads, and mobile hotspots running indefinitely
 
 **Turn Off Display Without Sleep** triggers this natural idle path on demand:
 
-1. **Instant Pitch-Black Screen (0 ms)**: Creates an instant fullscreen topmost blackout
+1. **Instant Pitch-Black Screen**: Creates an instant fullscreen topmost blackout
    overlay across all monitors so the screen appears turned off immediately.
 2. **Dynamic 1-Second Timeout**: Temporarily injects a 1-second display idle timeout
    (`VIDEOIDLE`) into the active power scheme. Windows naturally powers down the
@@ -346,7 +344,7 @@ static void ShowBlackoutWindow() {
         SetWindowPos(g_hBlackoutWnd, HWND_TOPMOST, x, y, cx, cy,
                      SWP_SHOWWINDOW | SWP_NOACTIVATE);
         UpdateWindow(g_hBlackoutWnd);
-        Wh_Log(L"Blackout overlay displayed (0 ms visual blackout)");
+        Wh_Log(L"Blackout overlay displayed (instant visual blackout)");
     }
 }
 
@@ -931,7 +929,7 @@ static void TriggerFlow(int source) {
             break;
     }
 
-    // 1. Immediately present the fullscreen blackout overlay (0 ms instant black)
+    // 1. Immediately present the fullscreen blackout overlay
     ShowBlackoutWindow();
 
     // 2. Inject temporary 1-second VIDEOIDLE timeout
