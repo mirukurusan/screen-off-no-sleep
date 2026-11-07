@@ -1,7 +1,7 @@
 // ==WindhawkMod==
 // @id              screen-off-no-sleep
 // @name            Turn Off Display Without Sleep
-// @description     Turns the display off cleanly without entering Modern Standby sleep, keeping background audio playback, downloads, and mobile hotspots alive.
+// @description     Turns the display off without entering Modern Standby sleep, keeping background audio playback, downloads, and mobile hotspots alive.
 // @version         1.0.0
 // @author          mirukurusan
 // @github          https://github.com/mirukurusan
@@ -74,8 +74,7 @@ powercfg /setactive SCHEME_CURRENT
   *Note for traditional laptops (e.g. ThinkPad / Lenovo / Dell / HP with ACPI buttons)*:
   When the button action is set to "Do nothing", the ACPI driver silently discards button interrupts
   before user-mode software can see them. On these laptops, please use the **Trigger hotkey** or **Lid close**.
-- **External Window Message**: Broadcast `WindhawkModernIdleSleep_Trigger` or
-  `WindhawkTurnOffDisplayWithoutSleep_Trigger` from external scripts or taskbar shortcuts.
+- **External Window Message**: Broadcast `WindhawkScreenOffNoSleep_Trigger` from external scripts or taskbar shortcuts.
 
 ---
 
@@ -90,7 +89,7 @@ powercfg /setactive SCHEME_CURRENT
 
 // ==WindhawkModSettings==
 /*
-- LockOnIdleSleep: false
+- LockOnScreenOff: false
   $name: Lock workstation after display turns off
   $description: "If enabled, locks the workstation silently in the dark after the display powers off (requiring PIN/Windows Hello on wake). If disabled, waking returns directly to your active desktop."
 - TriggerHotkey: "Win+Alt+L"
@@ -175,10 +174,9 @@ static const UINT WATCHDOG_TIMEOUT_MS = 3000;
 // transition; it is the gesture that woke the device.
 static const ULONGLONG WAKE_GUARD_MS = 1500;
 
-static const wchar_t* MOD_WINDOW_CLASS = L"WindhawkModernIdleSleep";
-static const wchar_t* BLACKOUT_WINDOW_CLASS = L"WindhawkModernIdleSleepBlackout";
-static const wchar_t* TRIGGER_MESSAGE_NAME = L"WindhawkModernIdleSleep_Trigger";
-static const wchar_t* TRIGGER_MESSAGE_NAME_ALT = L"WindhawkTurnOffDisplayWithoutSleep_Trigger";
+static const wchar_t* MOD_WINDOW_CLASS = L"WindhawkScreenOffNoSleep";
+static const wchar_t* BLACKOUT_WINDOW_CLASS = L"WindhawkScreenOffNoSleepBlackout";
+static const wchar_t* TRIGGER_MESSAGE_NAME = L"WindhawkScreenOffNoSleep_Trigger";
 
 static const UINT WM_RELOAD_SETTINGS = WM_USER + 100;
 static const UINT WM_QUIT_THREAD = WM_USER + 101;
@@ -196,7 +194,7 @@ struct SavedPowerState {
 static const wchar_t* SAVED_POWER_STATE_VALUE = L"SavedPowerState";
 
 // Settings
-static std::atomic<bool> g_lockOnIdleSleep{false};
+static std::atomic<bool> g_lockOnScreenOff{false};
 static std::atomic<bool> g_handleLidClose{true};
 static std::atomic<bool> g_handlePowerButton{true};
 static std::atomic<bool> g_shuttingDown{false};
@@ -217,7 +215,6 @@ static HWND g_hBlackoutWnd = NULL;
 static HPOWERNOTIFY g_lidNotify = NULL;
 static HPOWERNOTIFY g_displayNotify = NULL;
 static UINT g_triggerMessage = 0;
-static UINT g_triggerMessageAlt = 0;
 
 static bool g_lidClosed = false;
 static bool g_lidStateInitialized = false;
@@ -367,12 +364,12 @@ static void DestroyBlackoutWindow() {
 // ─── Settings ────────────────────────────────────────────────────────────────
 
 static void LoadSettings() {
-    g_lockOnIdleSleep.store(Wh_GetIntSetting(L"LockOnIdleSleep") != 0);
+    g_lockOnScreenOff.store(Wh_GetIntSetting(L"LockOnScreenOff") != 0);
     g_handleLidClose.store(Wh_GetIntSetting(L"HandleLidClose") != 0);
     g_handlePowerButton.store(Wh_GetIntSetting(L"HandlePowerButton") != 0);
 
-    Wh_Log(L"Settings: LockOnIdleSleep=%d, HandleLidClose=%d, HandlePowerButton=%d",
-           (int)g_lockOnIdleSleep.load(), (int)g_handleLidClose.load(),
+    Wh_Log(L"Settings: LockOnScreenOff=%d, HandleLidClose=%d, HandlePowerButton=%d",
+           (int)g_lockOnScreenOff.load(), (int)g_handleLidClose.load(),
            (int)g_handlePowerButton.load());
 }
 
@@ -921,19 +918,19 @@ static void TriggerFlow(int source) {
 
     switch (source) {
         case 0:
-            Wh_Log(L"Starting idle-sleep flow: lid close");
+            Wh_Log(L"Starting screen-off flow: lid close");
             break;
         case 1:
-            Wh_Log(L"Starting idle-sleep flow: power button");
+            Wh_Log(L"Starting screen-off flow: power button");
             break;
         case 2:
-            Wh_Log(L"Starting idle-sleep flow: external message");
+            Wh_Log(L"Starting screen-off flow: external message");
             break;
         case 3:
-            Wh_Log(L"Starting idle-sleep flow: hotkey");
+            Wh_Log(L"Starting screen-off flow: hotkey");
             break;
         default:
-            Wh_Log(L"Starting idle-sleep flow: source %d", source);
+            Wh_Log(L"Starting screen-off flow: source %d", source);
             break;
     }
 
@@ -1016,11 +1013,11 @@ static void HandleDisplayState(DWORD state) {
             RestoreFlowSafeTimeout();
 
             // Perform silent lock in the dark if configured
-            if (g_lockOnIdleSleep.load()) {
-                Wh_Log(L"LockOnIdleSleep is enabled; locking workstation silently in the dark");
+            if (g_lockOnScreenOff.load()) {
+                Wh_Log(L"LockOnScreenOff is enabled; locking workstation silently in the dark");
                 LockWorkStation();
             } else {
-                Wh_Log(L"LockOnIdleSleep is disabled; keeping active desktop for wake");
+                Wh_Log(L"LockOnScreenOff is disabled; keeping active desktop for wake");
             }
 
             DestroyBlackoutWindow();
@@ -1034,8 +1031,7 @@ static void HandleDisplayState(DWORD state) {
 
 static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam,
                                 LPARAM lParam) {
-    if ((uMsg == g_triggerMessage && g_triggerMessage != 0) ||
-        (uMsg == g_triggerMessageAlt && g_triggerMessageAlt != 0)) {
+    if (uMsg == g_triggerMessage && g_triggerMessage != 0) {
         Wh_Log(L"External trigger message received");
         TriggerFlow(2);
         return 0;
@@ -1245,7 +1241,7 @@ static DWORD WINAPI ToolModThreadProc(LPVOID lpParam) {
     }
 
     g_hWnd = CreateWindowEx(
-        0, MOD_WINDOW_CLASS, L"ModernIdleSleep", WS_OVERLAPPED,
+        0, MOD_WINDOW_CLASS, L"ScreenOffNoSleep", WS_OVERLAPPED,
         0, 0, 0, 0, NULL, NULL, GetModuleHandle(NULL), NULL);
 
     if (!g_hWnd) {
@@ -1262,16 +1258,10 @@ static DWORD WINAPI ToolModThreadProc(LPVOID lpParam) {
     ChangeWindowMessageFilterEx(g_hWnd, WM_INPUT, MSGFLT_ALLOW, nullptr);
 
     g_triggerMessage = RegisterWindowMessageW(TRIGGER_MESSAGE_NAME);
-    g_triggerMessageAlt = RegisterWindowMessageW(TRIGGER_MESSAGE_NAME_ALT);
-    if (g_triggerMessage || g_triggerMessageAlt) {
-        Wh_Log(L"[Thread] External trigger messages registered: 0x%04X, 0x%04X",
-               g_triggerMessage, g_triggerMessageAlt);
-        if (g_triggerMessage) {
-            ChangeWindowMessageFilterEx(g_hWnd, g_triggerMessage, MSGFLT_ALLOW, nullptr);
-        }
-        if (g_triggerMessageAlt) {
-            ChangeWindowMessageFilterEx(g_hWnd, g_triggerMessageAlt, MSGFLT_ALLOW, nullptr);
-        }
+    if (g_triggerMessage) {
+        Wh_Log(L"[Thread] External trigger message registered: 0x%04X (%ls)",
+               g_triggerMessage, TRIGGER_MESSAGE_NAME);
+        ChangeWindowMessageFilterEx(g_hWnd, g_triggerMessage, MSGFLT_ALLOW, nullptr);
     }
 
     g_lidNotify = RegisterPowerSettingNotification(

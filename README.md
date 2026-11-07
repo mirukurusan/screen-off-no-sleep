@@ -28,7 +28,7 @@ The mod acts as a state machine managing display timeouts and visual overlays:
   ├── Global Hotkey (Win+Alt+L)
   ├── Hardware Power Button (Surface / 2-in-1 HID)
   ├── Laptop Lid Close (LIDACTION = 0)
-  └── Window Message (WindhawkTurnOffDisplayWithoutSleep_Trigger)
+  └── Window Message (WindhawkScreenOffNoSleep_Trigger)
          │
          ▼
 [ Step 1: 0 ms Instant Blackout Overlay ]
@@ -51,8 +51,8 @@ The mod acts as a state machine managing display timeouts and visual overlays:
 [ Step 4: State Restoration & Optional Silent Lock ]
   • Restores the exact captured AC/DC timeouts back into the power scheme and clears storage.
   • Dismisses the blackout overlay window.
-  • Optional: Silently locks workstation in the dark (LockOnIdleSleep = true),
-    or keeps active desktop for immediate return upon wake (LockOnIdleSleep = false).
+  • Optional: Silently locks workstation in the dark (LockOnScreenOff = true),
+    or keeps active desktop for immediate return upon wake (LockOnScreenOff = false).
 ```
 
 ### Key Technical Highlights
@@ -68,7 +68,56 @@ The mod acts as a state machine managing display timeouts and visual overlays:
 
 ---
 
-## 3. Hardware Button Handling & Privilege Isolation (UIPI)
+## 3. Supported Triggers
+
+The mod supports multiple activation methods:
+
+* **Global Hotkey** *(Default: `Win+Alt+L`)*:
+  Global keyboard shortcut to immediately turn off the display. Fully customizable in settings.
+* **Laptop Lid Close**:
+  Closing the laptop lid triggers display-off instantly while keeping tasks alive (requires native lid action set to "Do nothing").
+* **Hardware Power Button (Surface & Modern 2-in-1s)**:
+  Directly intercepts hardware HID power button reports, bypassing Windows sleep transitions (requires native power button action set to "Do nothing").
+* **External Window Message (IPC / Automation)**:
+  Third-party applications, Stream Deck, macro tools, or scripts can trigger the display-off flow by broadcasting or posting the registered window message:
+  ```cpp
+  // Registered message string
+  "WindhawkScreenOffNoSleep_Trigger"
+  ```
+  The mod configures `ChangeWindowMessageFilterEx` to accept this message across UIPI integrity boundaries (including standard user processes).
+
+  **Automation Examples**:
+
+  * **PowerShell** (taskbar shortcut or script):
+    ```powershell
+    Add-Type @"
+    using System;
+    using System.Runtime.InteropServices;
+    public class ScreenOff {
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        public static extern uint RegisterWindowMessage(string lpString);
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+        public static void Trigger() {
+            uint msg = RegisterWindowMessage("WindhawkScreenOffNoSleep_Trigger");
+            if (msg != 0) {
+                PostMessage((IntPtr)0xffff, msg, IntPtr.Zero, IntPtr.Zero);
+            }
+        }
+    }
+    "@
+    [ScreenOff]::Trigger()
+    ```
+
+  * **AutoHotkey (v2)**:
+    ```ahk
+    msg := DllCall("RegisterWindowMessage", "Str", "WindhawkScreenOffNoSleep_Trigger", "UInt")
+    DllCall("PostMessage", "Ptr", 0xFFFF, "UInt", msg, "Ptr", 0, "Ptr", 0)
+    ```
+
+---
+
+## 4. Hardware Button Handling & Privilege Isolation (UIPI)
 
 ### The Privilege Challenge (UIPI & UIAccess)
 By default, Windhawk tool mods run at the interactive user's standard integrity level. When an elevated application (such as an Administrator Command Prompt, PowerShell, or Task Manager) holds foreground focus, Windows **UIPI (User Interface Privilege Isolation)** in `win32k.sys` drops background raw input sink (`RIDEV_INPUTSINK`) messages to prevent unauthorized input monitoring.
@@ -92,7 +141,7 @@ With the `UIAccess` privilege, Windows permits the mod's background input sink t
 
 ---
 
-## 4. Prerequisites
+## 5. Prerequisites
 
 To allow this mod to take control of lid-close or power button events, Windows native actions must be set to **"Do nothing" (`0`)** so Windows does not trigger its built-in sleep transition.
 
@@ -108,11 +157,11 @@ powercfg /setactive SCHEME_CURRENT
 
 ---
 
-## 5. Configuration & Settings
+## 6. Configuration & Settings
 
 The mod provides configurable options in the Windhawk Mod Settings UI:
 
-* **Lock workstation after display turns off (`LockOnIdleSleep`)** *(Default: `false`)*:
+* **Lock workstation after display turns off (`LockOnScreenOff`)** *(Default: `false`)*:
   * `false`: Display powers down while keeping desktop unlocked. Waking up immediately returns to your open applications.
   * `true`: Silently locks the workstation in the dark once the display powers down, requiring PIN/Windows Hello on wake.
 * **Trigger hotkey (`TriggerHotkey`)** *(Default: `Win+Alt+L`)*:
@@ -124,7 +173,7 @@ The mod provides configurable options in the Windhawk Mod Settings UI:
 
 ---
 
-## 6. Build & Installation
+## 7. Build & Installation
 
 ### Requirements
 * [Windhawk v2.0+](https://windhawk.net/)
@@ -138,18 +187,18 @@ The mod requires the following Windows runtime libraries:
 
 ### Installation
 1. In Windhawk, navigate to **Mods** -> **Create Local Mod**.
-2. Copy the contents of [`windhawk-mod/turn-off-display-no-sleep.wh.cpp`](file:///d:/UserData/Desktop/modern-standby-idle-sleep/windhawk-mod/turn-off-display-no-sleep.wh.cpp) into the editor.
+2. Copy the contents of `windhawk-mod/screen-off-no-sleep.wh.cpp` into the editor.
 3. Click **Compile and run**.
 
 ---
 
-## 7. License
+## 8. License
 
 MIT License. See [LICENSE](LICENSE) for details.
 
 ---
 
-## 8. References & Microsoft Technical Documentation
+## 9. References & Microsoft Technical Documentation
 
 For deeper understanding of Windows power management and Modern Standby internals, refer to Microsoft's official hardware design guides:
 
