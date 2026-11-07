@@ -102,15 +102,12 @@ powercfg /setactive SCHEME_CURRENT
 #include <windows.h>
 #include <powrprof.h>
 #include <hidsdi.h>
+#include <windhawk_utils.h>
 #include <atomic>
 #include <cstring>
 #include <string>
 #include <vector>
 #include <wchar.h>
-
-#ifndef MOD_NOREPEAT
-#define MOD_NOREPEAT 0x4000
-#endif
 
 // ─── GUIDs ───────────────────────────────────────────────────────────────────
 
@@ -771,7 +768,7 @@ static bool ParseHotkeyKey(const std::wstring& part, UINT* vk) {
         {L"right", VK_RIGHT},         {L"pause", VK_PAUSE},
         {L"printscreen", VK_SNAPSHOT}, {L"prtsc", VK_SNAPSHOT},
         {L"backquote", VK_OEM_3},     {L"`", VK_OEM_3},
-        {L"plus", VK_OEM_PLUS},       {L"+", VK_OEM_PLUS},
+        {L"plus", VK_OEM_PLUS},
         {L"minus", VK_OEM_MINUS},     {L"-", VK_OEM_MINUS},
         {L"comma", VK_OEM_COMMA},     {L",", VK_OEM_COMMA},
         {L"period", VK_OEM_PERIOD},   {L".", VK_OEM_PERIOD},
@@ -849,12 +846,8 @@ static void UpdateTriggerHotkey() {
         g_hotkeyRegistered = false;
     }
 
-    PCWSTR setting = Wh_GetStringSetting(L"TriggerHotkey");
-    std::wstring text;
-    if (setting) {
-        text = setting;
-        Wh_FreeStringSetting(setting);
-    }
+    auto hotkeySetting = WindhawkUtils::StringSetting::make(L"TriggerHotkey");
+    std::wstring text = hotkeySetting.get() ? hotkeySetting.get() : L"";
 
     if (text.empty()) {
         Wh_Log(L"Trigger hotkey disabled (empty setting)");
@@ -1250,8 +1243,6 @@ static DWORD WINAPI ToolModThreadProc(LPVOID lpParam) {
     ShowWindow(g_hWnd, SW_HIDE);
     Wh_Log(L"[Thread] Hidden window created: HWND=%p", (void*)g_hWnd);
 
-    ChangeWindowMessageFilterEx(g_hWnd, WM_INPUT, MSGFLT_ALLOW, nullptr);
-
     g_triggerMessage = RegisterWindowMessageW(TRIGGER_MESSAGE_NAME);
     if (g_triggerMessage) {
         Wh_Log(L"[Thread] External trigger message registered: 0x%04X (%ls)",
@@ -1364,7 +1355,6 @@ BOOL WhTool_ModInit() {
 
 void WhTool_ModSettingsChanged() {
     Wh_Log(L"=== Settings Changed ===");
-    LoadSettings();
 
     if (g_hWnd) {
         PostMessage(g_hWnd, WM_RELOAD_SETTINGS, 0, 0);
