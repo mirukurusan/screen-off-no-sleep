@@ -390,8 +390,10 @@ static void RecoverSavedPowerState() {
         WriteResult result = WriteTimeoutValuesNoLock(state.scheme, state.acTimeout, state.dcTimeout);
         if (result.acOk || result.dcOk) {
             ApplySchemeIfActiveNoLock(state.scheme);
+            ClearPowerStateRecordNoLock();
+        } else {
+            Wh_Log(L"Failed to restore leftover power state; keeping record for future recovery");
         }
-        ClearPowerStateRecordNoLock();
     }
 
     LeaveCriticalSection(&g_powerLock);
@@ -417,33 +419,46 @@ static bool InjectOneSecondTimeout() {
         return false;
     }
 
-    DWORD currentAc = 0;
-    DWORD currentDc = 0;
-    DWORD acErr = PowerReadACValueIndex(
-        nullptr, &active, &GUID_VIDEO_SUBGROUP_LOCAL,
-        &GUID_VIDEO_IDLE_TIMEOUT_LOCAL, &currentAc);
-    DWORD dcErr = PowerReadDCValueIndex(
-        nullptr, &active, &GUID_VIDEO_SUBGROUP_LOCAL,
-        &GUID_VIDEO_IDLE_TIMEOUT_LOCAL, &currentDc);
+    SavedPowerState state = {};
+    bool hasExistingRecord = (Wh_GetBinaryValue(SAVED_POWER_STATE_VALUE, &state, sizeof(state)) == sizeof(SavedPowerState));
 
-    if (acErr != ERROR_SUCCESS || dcErr != ERROR_SUCCESS) {
-        Wh_Log(L"Failed to read current VIDEOIDLE (AC err=%lu, DC err=%lu); aborting injection",
-               acErr, dcErr);
-        LeaveCriticalSection(&g_powerLock);
-        return false;
-    }
+    if (!hasExistingRecord) {
+        DWORD currentAc = 0;
+        DWORD currentDc = 0;
+        DWORD acErr = PowerReadACValueIndex(
+            nullptr, &active, &GUID_VIDEO_SUBGROUP_LOCAL,
+            &GUID_VIDEO_IDLE_TIMEOUT_LOCAL, &currentAc);
+        DWORD dcErr = PowerReadDCValueIndex(
+            nullptr, &active, &GUID_VIDEO_SUBGROUP_LOCAL,
+            &GUID_VIDEO_IDLE_TIMEOUT_LOCAL, &currentDc);
 
-    // Persist to mod storage before writing 1 second so an unclean exit can recover.
-    SavedPowerState state = { active, currentAc, currentDc };
-    if (!Wh_SetBinaryValue(SAVED_POWER_STATE_VALUE, &state, sizeof(state))) {
-        Wh_Log(L"Failed to record power state to mod storage; aborting injection");
-        LeaveCriticalSection(&g_powerLock);
-        return false;
+        if (acErr != ERROR_SUCCESS || dcErr != ERROR_SUCCESS) {
+            Wh_Log(L"Failed to read current VIDEOIDLE (AC err=%lu, DC err=%lu); aborting injection",
+                   acErr, dcErr);
+            LeaveCriticalSection(&g_powerLock);
+            return false;
+        }
+
+        state.scheme = active;
+        state.acTimeout = currentAc;
+        state.dcTimeout = currentDc;
+
+        // Persist to mod storage before writing 1 second so an unclean exit can recover.
+        if (!Wh_SetBinaryValue(SAVED_POWER_STATE_VALUE, &state, sizeof(state))) {
+            Wh_Log(L"Failed to record power state to mod storage; aborting injection");
+            LeaveCriticalSection(&g_powerLock);
+            return false;
+        }
+    } else {
+        Wh_Log(L"Using existing recorded power state: AC=%lu s, DC=%lu s",
+               state.acTimeout, state.dcTimeout);
     }
 
     WriteResult result = WriteTimeoutValuesNoLock(active, 1, 1);
     if (!result.acOk && !result.dcOk) {
-        ClearPowerStateRecordNoLock();
+        if (!hasExistingRecord) {
+            ClearPowerStateRecordNoLock();
+        }
         Wh_Log(L"Failed to write the 1-second display-off timeout");
         LeaveCriticalSection(&g_powerLock);
         return false;
@@ -457,7 +472,7 @@ static bool InjectOneSecondTimeout() {
     LeaveCriticalSection(&g_powerLock);
 
     Wh_Log(L"Injected VIDEOIDLE=1 s (saved AC=%lu s, DC=%lu s, AC ok=%d, DC ok=%d)",
-           currentAc, currentDc, result.acOk, result.dcOk);
+           state.acTimeout, state.dcTimeout, result.acOk, result.dcOk);
     return true;
 }
 
@@ -473,8 +488,10 @@ static void RestoreFlowSafeTimeoutNoLock() {
     WriteResult result = WriteTimeoutValuesNoLock(state.scheme, state.acTimeout, state.dcTimeout);
     if (result.acOk || result.dcOk) {
         ApplySchemeIfActiveNoLock(state.scheme);
+        ClearPowerStateRecordNoLock();
+    } else {
+        Wh_Log(L"Failed to restore VIDEOIDLE; keeping saved record for startup recovery");
     }
-    ClearPowerStateRecordNoLock();
 
     Wh_Log(L"Restored VIDEOIDLE: AC=%lu s, DC=%lu s (AC ok=%d, DC ok=%d)",
            state.acTimeout, state.dcTimeout, result.acOk, result.dcOk);
@@ -902,6 +919,13 @@ static VOID CALLBACK WatchdogTimerProc(HWND hwnd, UINT, UINT_PTR, DWORD) {
 // Source: 0 = lid, 1 = power button, 2 = external message, 3 = hotkey.
 static void TriggerFlow(int source) {
     if (g_shuttingDown.load()) {
+        return;
+    }
+
+    DWORD currentSessionId = 0;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &currentSessionId) ||
+        currentSessionId != WTSGetActiveConsoleSessionId()) {
+        Wh_Log(L"Trigger (%d) ignored: not in active console session", source);
         return;
     }
 
