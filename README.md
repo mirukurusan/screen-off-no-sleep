@@ -66,6 +66,11 @@ The mod acts as a state machine managing display timeouts and visual overlays:
 4. **Crash-Resilient State Restoration**:
    Before injecting the 1-second timeout, the mod snapshots the active power plan GUID and current AC/DC timeouts into mod storage (`Wh_SetBinaryValue`). The original values are restored and cleared once hardware display-off is confirmed. If the system or tool process terminates mid-flow (e.g. power loss or crash), the original timeout is automatically recovered upon the next startup.
 
+### What Happens on an Unclean Exit?
+The 1-second timeout only exists in the active power plan for the 1–3 seconds between trigger and hardware display power-down. If the tool process is forcefully terminated during those few seconds (system crash, power loss, or process kill):
+* The 1-second timeout remains in the active power plan until the mod runs again and automatically restores the original timeout from storage (`RecoverSavedPowerState`).
+* If the screen turns off after one second of idle while the mod is disabled or uninstalled, simply re-adjust "Turn off my screen after" in Windows Settings.
+
 ---
 
 ## 3. Supported Triggers
@@ -151,6 +156,18 @@ powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 0
 powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 0
 powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0
 powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0
+powercfg /setactive SCHEME_CURRENT
+```
+
+> **Warning**: With the lid action set to "Do nothing", closing the lid and putting the laptop into a backpack or bag will keep the system running (until the regular system sleep timeout). Make sure to explicitly sleep or shut down your laptop before bagging it.
+
+### Reverting Prerequisites
+If you disable or uninstall this mod and wish to restore native Windows sleep actions:
+```cmd
+powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 1
+powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 1
+powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 1
+powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 1
 powercfg /setactive SCHEME_CURRENT
 ```
 

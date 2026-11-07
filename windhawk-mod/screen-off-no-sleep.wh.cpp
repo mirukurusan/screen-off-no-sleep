@@ -29,9 +29,10 @@ Standby keeps audio streams, downloads, and mobile hotspots running indefinitely
 
 1. **Instant Pitch-Black Screen**: Creates an instant fullscreen topmost blackout
    overlay across all monitors so the screen appears turned off immediately.
-2. **Dynamic 1-Second Timeout**: Temporarily injects a 1-second display idle timeout
-   (`VIDEOIDLE`) into the active power scheme. Windows naturally powers down the
-   monitors via the idle path within ~1–2 seconds without suspending background tasks.
+2. **Dynamic 1-Second Timeout**: Saves your current timeouts and temporarily injects
+   a 1-second display idle timeout (`VIDEOIDLE`) into the active power scheme. Windows
+   naturally powers down the monitors via the idle path within ~1–2 seconds without
+   suspending background tasks.
 3. **Automatic Restoration**: When hardware display-off (`GUID_CONSOLE_DISPLAY_STATE == 0`)
    is detected, the original display timeout is immediately restored, and the overlay
    is dismissed.
@@ -43,6 +44,14 @@ Standby keeps audio streams, downloads, and mobile hotspots running indefinitely
 5. **Failsafe Watchdog**: If the display does not power down within 3 seconds (e.g. due
    to mouse movement or an application holding `ES_DISPLAY_REQUIRED` / active video playback),
    the overlay is removed and timeouts are restored automatically.
+
+### What happens on an unclean exit?
+The 1-second timeout only exists in the power plan for the 1–3 seconds between trigger
+and display power-down. If the tool process is forcefully terminated during those few
+seconds (system crash, power loss, or process kill), the 1-second timeout remains in the
+active power plan until the mod runs again and automatically restores it from storage.
+If the screen turns off after one second of idle while the mod is disabled or uninstalled,
+simply re-adjust "Turn off my screen after" in Windows Settings.
 
 ---
 
@@ -60,6 +69,20 @@ powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0
 powercfg /setactive SCHEME_CURRENT
 ```
 
+> **Warning**: With the lid action set to "Do nothing", closing the lid and putting the laptop
+> into a backpack or bag will keep the system running (until the regular system sleep timeout).
+> Make sure to explicitly sleep or shut down your laptop before bagging it.
+
+### Reverting prerequisites
+If you disable or uninstall this mod and want to restore the native sleep behavior:
+```cmd
+powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 1
+powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 1
+powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 1
+powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 1
+powercfg /setactive SCHEME_CURRENT
+```
+
 ---
 
 ## Triggers
@@ -68,8 +91,8 @@ powercfg /setactive SCHEME_CURRENT
 - **Lid Close**: Triggered automatically when closing the laptop lid. Requires native lid 
   close action set to "Do nothing".
 - **Power Button**: Supported on devices where the power button is exposed via HID System Control
-  (Usage Page `0x01`, Usages `0x80`/`0x81`/`0x82`, such as Microsoft Surface Pro). Requires native 
-  power button action set to "Do nothing". 
+  (Usage Page `0x01`, Usages `0x80`/`0x81`/`0x82` or `0x0D`, such as Microsoft Surface Pro).
+  Requires native power button action set to "Do nothing".
   Not detectable on laptops with ACPI-only power buttons, use Trigger hotkey or Lid close instead.
 - **External Window Message**: Broadcast `WindhawkScreenOffNoSleep_Trigger` from external scripts or taskbar shortcuts.
 
