@@ -62,7 +62,7 @@ The mod acts as a state machine managing display timeouts and visual overlays:
 2. **Instant Visual Blackout**:
    Display controllers, TCONs, and GPU driver pipes often take 1–2 seconds to complete an idle power-down sequence. The mod instantly displays a pitch-black `WS_EX_TOPMOST` window so the display appears turned off immediately upon user input.
 3. **Failsafe Watchdog**:
-   If an unexpected user action (e.g. accidental mouse shake) interrupts the idle state before hardware display-off arrives, a 3-second watchdog timer cleans up the overlay and restores original power timeouts automatically.
+   If an unexpected user action (e.g. accidental mouse shake) or an active application holding a display power request (`ES_DISPLAY_REQUIRED` / video playback / presentation) prevents the idle transition, a 3-second watchdog timer automatically cleans up the overlay and restores the original power timeout.
 4. **Crash-Resilient State Restoration**:
    Before injecting the 1-second timeout, the mod snapshots the active power plan GUID and current AC/DC timeouts into mod storage (`Wh_SetBinaryValue`). The original values are restored and cleared once hardware display-off is confirmed. If the system or tool process terminates mid-flow (e.g. power loss or crash), the original timeout is automatically recovered upon the next startup.
 

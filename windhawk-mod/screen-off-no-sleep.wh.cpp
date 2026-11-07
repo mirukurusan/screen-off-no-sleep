@@ -39,8 +39,9 @@ Standby keeps audio streams, downloads, and mobile hotspots running indefinitely
      desktop upon waking the screen—no PIN or Windows Hello delay.
    - If desired, enable **Lock workstation after display turns off** to silently lock the
      session in the dark once the screen is powered down.
-5. **Failsafe Watchdog**: If the display does not power down within 3 seconds (e.g., due
-   to mouse movement), the overlay is removed and timeouts are restored automatically.
+5. **Failsafe Watchdog**: If the display does not power down within 3 seconds (e.g. due
+   to mouse movement or an application holding `ES_DISPLAY_REQUIRED` / active video playback),
+   the overlay is removed and timeouts are restored automatically.
 
 ---
 
@@ -890,7 +891,7 @@ static VOID CALLBACK WatchdogTimerProc(HWND hwnd, UINT, UINT_PTR, DWORD) {
     KillTimer(hwnd, WATCHDOG_TIMER_ID);
 
     if (g_flowActive.load()) {
-        Wh_Log(L"Watchdog: no display-off event within %u ms; restoring safe timeout and dismissing blackout",
+        Wh_Log(L"Watchdog: no display-off event within %u ms (user activity detected or an application is holding ES_DISPLAY_REQUIRED / video playback); restoring safe timeout and dismissing blackout",
                WATCHDOG_TIMEOUT_MS);
         RestoreFlowSafeTimeout();
         DestroyBlackoutWindow();
