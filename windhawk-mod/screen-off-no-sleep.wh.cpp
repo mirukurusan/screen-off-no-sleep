@@ -414,7 +414,16 @@ static void RecoverSavedPowerState() {
             ApplySchemeIfActiveNoLock(state.scheme);
             ClearPowerStateRecordNoLock();
         } else {
-            Wh_Log(L"Failed to restore leftover power state; keeping record for future recovery");
+            DWORD dummy = 0;
+            DWORD checkErr = PowerReadACValueIndex(
+                nullptr, &state.scheme, &GUID_VIDEO_SUBGROUP_LOCAL,
+                &GUID_VIDEO_IDLE_TIMEOUT_LOCAL, &dummy);
+            if (checkErr != ERROR_SUCCESS) {
+                Wh_Log(L"Recorded power scheme no longer exists (err=%lu); dropping stale record", checkErr);
+                ClearPowerStateRecordNoLock();
+            } else {
+                Wh_Log(L"Failed to restore leftover power state; keeping record for future recovery");
+            }
         }
     }
 
@@ -443,6 +452,16 @@ static bool InjectOneSecondTimeout() {
 
     SavedPowerState state = {};
     bool hasExistingRecord = (Wh_GetBinaryValue(SAVED_POWER_STATE_VALUE, &state, sizeof(state)) == sizeof(SavedPowerState));
+
+    if (hasExistingRecord && !GuidEqual(state.scheme, active)) {
+        Wh_Log(L"Saved power state belongs to another scheme; attempting restoration of old scheme");
+        WriteResult oldRes = WriteTimeoutValuesNoLock(state.scheme, state.acTimeout, state.dcTimeout);
+        if (oldRes.acOk || oldRes.dcOk) {
+            ApplySchemeIfActiveNoLock(state.scheme);
+        }
+        ClearPowerStateRecordNoLock();
+        hasExistingRecord = false;
+    }
 
     if (!hasExistingRecord) {
         DWORD currentAc = 0;
