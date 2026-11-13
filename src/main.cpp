@@ -20,6 +20,37 @@ static UINT g_wmTaskbarCreated = 0;
 static UINT g_wmTriggerMessage = 0;
 static HANDLE g_hMutex = nullptr;
 
+static void EnableHighDpiAwareness() {
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    if (hUser32) {
+        typedef BOOL(WINAPI* PFN_SetProcessDpiAwarenessContext)(DPI_AWARENESS_CONTEXT);
+        auto pfn = reinterpret_cast<PFN_SetProcessDpiAwarenessContext>(
+            GetProcAddress(hUser32, "SetProcessDpiAwarenessContext"));
+        if (pfn) {
+            if (pfn(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+                Config::Log(L"DPI awareness set to PerMonitorV2");
+                return;
+            }
+            if (pfn(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE)) {
+                Config::Log(L"DPI awareness set to PerMonitor");
+                return;
+            }
+        }
+    }
+
+    HMODULE hShcore = LoadLibraryW(L"shcore.dll");
+    if (hShcore) {
+        typedef HRESULT(WINAPI* PFN_SetProcessDpiAwareness)(int);
+        auto pfn = reinterpret_cast<PFN_SetProcessDpiAwareness>(
+            GetProcAddress(hShcore, "SetProcessDpiAwareness"));
+        if (pfn) {
+            pfn(2); // PROCESS_PER_MONITOR_DPI_AWARE
+            Config::Log(L"DPI awareness set via shcore");
+        }
+        FreeLibrary(hShcore);
+    }
+}
+
 static bool IsElevated() {
     BOOL elevated = FALSE;
     HANDLE hToken = nullptr;
@@ -49,13 +80,84 @@ static bool IsTaskbarLightTheme() {
     return false;
 }
 
-static HICON GetAppropriateTrayIcon() {
+static UINT GetTaskbarDpi(HWND hWnd) {
+    UINT dpi = 0;
+    HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    HMODULE hUser = GetModuleHandleW(L"user32.dll");
+    if (hUser) {
+        typedef UINT(WINAPI* PFN_GetDpiForWindow)(HWND);
+        auto pGetDpiForWindow = reinterpret_cast<PFN_GetDpiForWindow>(
+            GetProcAddress(hUser, "GetDpiForWindow"));
+        if (pGetDpiForWindow) {
+            if (hTaskbar) {
+                dpi = pGetDpiForWindow(hTaskbar);
+            }
+            if (!dpi && hWnd) {
+                dpi = pGetDpiForWindow(hWnd);
+            }
+        }
+        if (!dpi) {
+            typedef UINT(WINAPI* PFN_GetDpiForSystem)();
+            auto pGetDpiForSystem = reinterpret_cast<PFN_GetDpiForSystem>(
+                GetProcAddress(hUser, "GetDpiForSystem"));
+            if (pGetDpiForSystem) {
+                dpi = pGetDpiForSystem();
+            }
+        }
+    }
+    if (!dpi) {
+        HDC hdc = GetDC(nullptr);
+        if (hdc) {
+            dpi = static_cast<UINT>(GetDeviceCaps(hdc, LOGPIXELSX));
+            ReleaseDC(nullptr, hdc);
+        }
+    }
+    return dpi ? dpi : 96;
+}
+
+static void GetTrayIconMetrics(HWND hWnd, int* cx, int* cy) {
+    UINT dpi = GetTaskbarDpi(hWnd);
+    HMODULE hUser = GetModuleHandleW(L"user32.dll");
+    if (hUser) {
+        typedef int(WINAPI* PFN_GetSystemMetricsForDpi)(int, UINT);
+        auto pGetSystemMetricsForDpi = reinterpret_cast<PFN_GetSystemMetricsForDpi>(
+            GetProcAddress(hUser, "GetSystemMetricsForDpi"));
+        if (pGetSystemMetricsForDpi) {
+            *cx = pGetSystemMetricsForDpi(SM_CXSMICON, dpi);
+            *cy = pGetSystemMetricsForDpi(SM_CYSMICON, dpi);
+        }
+    }
+    if (*cx <= 0 || *cy <= 0) {
+        *cx = MulDiv(16, static_cast<int>(dpi), 96);
+        *cy = MulDiv(16, static_cast<int>(dpi), 96);
+    }
+}
+
+static HICON GetAppropriateTrayIcon(HWND hWnd) {
     HINSTANCE hInst = GetModuleHandle(nullptr);
     int iconId = IsTaskbarLightTheme() ? IDI_ICON_LIGHT_TASKBAR : IDI_ICON_DARK_TASKBAR;
 
-    int cx = GetSystemMetrics(SM_CXSMICON);
-    int cy = GetSystemMetrics(SM_CYSMICON);
-    HICON hIcon = static_cast<HICON>(LoadImageW(hInst, MAKEINTRESOURCEW(iconId), IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR));
+    int cx = 0, cy = 0;
+    GetTrayIconMetrics(hWnd, &cx, &cy);
+
+    HICON hIcon = nullptr;
+    HMODULE hComCtl = LoadLibraryW(L"comctl32.dll");
+    if (hComCtl) {
+        typedef HRESULT(WINAPI* PFN_LoadIconWithScaleDown)(HINSTANCE, PCWSTR, int, int, HICON*);
+        auto pLoadIconWithScaleDown = reinterpret_cast<PFN_LoadIconWithScaleDown>(
+            GetProcAddress(hComCtl, "LoadIconWithScaleDown"));
+        if (pLoadIconWithScaleDown) {
+            HRESULT hr = pLoadIconWithScaleDown(hInst, MAKEINTRESOURCEW(iconId), cx, cy, &hIcon);
+            if (FAILED(hr)) {
+                hIcon = nullptr;
+            }
+        }
+        FreeLibrary(hComCtl);
+    }
+
+    if (!hIcon) {
+        hIcon = static_cast<HICON>(LoadImageW(hInst, MAKEINTRESOURCEW(iconId), IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR));
+    }
     if (!hIcon) {
         hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(iconId));
     }
@@ -72,7 +174,7 @@ static void AddTrayIcon(HWND hWnd) {
     g_nid.uID = 1;
     g_nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
-    g_nid.hIcon = GetAppropriateTrayIcon();
+    g_nid.hIcon = GetAppropriateTrayIcon(hWnd);
 
     wcscpy_s(g_nid.szTip, L"Turn Off Display Without Sleep\nLeft-click: Turn off display\nRight-click: Menu");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
@@ -87,14 +189,15 @@ static void UpdateTrayIcon(HWND hWnd) {
         return;
     }
 
-    HICON hNewIcon = GetAppropriateTrayIcon();
+    HICON hNewIcon = GetAppropriateTrayIcon(hWnd);
     if (hNewIcon) {
-        if (g_nid.hIcon && g_nid.hIcon != hNewIcon) {
-            DestroyIcon(g_nid.hIcon);
-        }
+        HICON hOldIcon = g_nid.hIcon;
         g_nid.hIcon = hNewIcon;
         g_nid.uFlags = NIF_ICON;
         Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+        if (hOldIcon && hOldIcon != hNewIcon) {
+            DestroyIcon(hOldIcon);
+        }
     }
 }
 
@@ -179,6 +282,12 @@ static LRESULT CALLBACK MainWindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
             return 0;
         }
 
+        case WM_DPICHANGED: {
+            Config::Log(L"WM_DPICHANGED; updating tray icon for new DPI");
+            UpdateTrayIcon(hWnd);
+            return 0;
+        }
+
         case WM_SETTINGCHANGE: {
             if (lParam && wcscmp(reinterpret_cast<LPCWSTR>(lParam), L"ImmersiveColorSet") == 0) {
                 Config::Log(L"Theme changed; updating tray icon for taskbar");
@@ -252,7 +361,10 @@ static LRESULT CALLBACK MainWindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine*/, int /*nCmdShow*/) {
-    // 1. Single Instance Check
+    // 1. Enable High-DPI Awareness (PerMonitorV2 + GDI Scaling)
+    EnableHighDpiAwareness();
+
+    // 2. Single Instance Check
     g_wmTriggerMessage = RegisterWindowMessageW(TRIGGER_MESSAGE_NAME);
 
     g_hMutex = CreateMutexW(nullptr, TRUE, MUTEX_NAME);
@@ -266,7 +378,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lp
         return 0;
     }
 
-    // 2. Administrator Elevation Check
+    // 3. Administrator Elevation Check
     if (!IsElevated()) {
         MessageBoxW(
             nullptr,
@@ -278,14 +390,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lp
         return 1;
     }
 
-    // 3. Initialize Common Controls
+    // 4. Initialize Common Controls
     INITCOMMONCONTROLSEX icex = {sizeof(INITCOMMONCONTROLSEX), ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&icex);
 
-    // 4. Register TaskbarCreated message
+    // 5. Register TaskbarCreated message
     g_wmTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 
-    // 5. Register Main Hidden Window Class
+    // 6. Register Main Hidden Window Class
     WNDCLASSEXW wc = {sizeof(WNDCLASSEXW)};
     wc.lpfnWndProc = MainWindowProc;
     wc.hInstance = hInstance;
@@ -295,7 +407,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lp
         return 1;
     }
 
-    // 6. Create Main Hidden Window (Top-level window to receive broadcasts)
+    // 7. Create Main Hidden Window (Top-level window to receive broadcasts)
     g_hWnd = CreateWindowExW(
         0,
         MAIN_WINDOW_CLASS,
@@ -310,14 +422,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lp
         return 1;
     }
 
-    // 7. Load Settings from Registry
+    // 8. Load Settings from Registry
     bool lockOnScreenOff = false;
     bool handleLidClose = false;
     bool handlePowerButton = false;
     std::wstring triggerHotkey = L"Win+Alt+L";
     Config::LoadAppSettings(&lockOnScreenOff, &handleLidClose, &handlePowerButton, &triggerHotkey);
 
-    // 8. Initialize Subsystems
+    // 9. Initialize Subsystems
     PowerManager::Initialize(g_hWnd);
     PowerManager::SetLockOnScreenOff(lockOnScreenOff);
 
@@ -326,19 +438,19 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lp
     InputListener::SetHandlePowerButton(handlePowerButton);
     InputListener::SetTriggerHotkey(triggerHotkey);
 
-    // 9. Display Tray Icon
+    // 10. Display Tray Icon
     AddTrayIcon(g_hWnd);
 
     Config::Log(L"ScreenOffNoSleep standalone application started successfully");
 
-    // 10. Message Loop
+    // 11. Message Loop
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
 
-    // 11. Cleanup
+    // 12. Cleanup
     UnregisterClassW(MAIN_WINDOW_CLASS, hInstance);
     if (g_hMutex) {
         ReleaseMutex(g_hMutex);
