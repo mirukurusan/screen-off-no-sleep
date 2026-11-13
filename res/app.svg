@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="tile" x1="40" y1="16" x2="216" y2="240" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#66A3FF"/>
+      <stop offset="0.55" stop-color="#3B82F6"/>
+      <stop offset="1" stop-color="#1E40AF"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="128" y1="58" x2="128" y2="166" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#182A4D"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded backing tile -->
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#tile)"/>
+  <rect x="9" y="9" width="238" height="238" rx="55" fill="none" stroke="#FFFFFF" stroke-opacity="0.2" stroke-width="2"/>
+
+  <!-- Monitor -->
+  <rect x="50" y="58" width="156" height="108" rx="16" fill="url(#screen)" stroke="#FFFFFF" stroke-width="16" stroke-linejoin="round"/>
+
+  <!-- System activity indicator still running while the screen is off -->
+  <path d="M80 116H102L112 96L126 138L138 116H176" fill="none" stroke="#34D399" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Stand -->
+  <line x1="128" y1="166" x2="128" y2="190" stroke="#FFFFFF" stroke-width="16" stroke-linecap="round"/>
+  <line x1="94" y1="198" x2="162" y2="198" stroke="#FFFFFF" stroke-width="16" stroke-linecap="round"/>
+</svg>
