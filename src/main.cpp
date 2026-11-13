@@ -167,20 +167,49 @@ static HICON GetAppropriateTrayIcon(HWND hWnd) {
     return hIcon;
 }
 
+#ifndef NIF_SHOWTIP
+#define NIF_SHOWTIP 0x00000080
+#endif
+
+static std::wstring BuildTrayTipText() {
+    std::wstring hotkey = InputListener::GetTriggerHotkey();
+    if (hotkey.empty()) {
+        hotkey = L"None";
+    }
+    return L"Turn Off Display Without Sleep\nHotkey: " + hotkey + L"\nLeft-click: Turn off display";
+}
+
+static void UpdateTrayTip() {
+    if (!g_nid.hWnd) return;
+
+    std::wstring tip = BuildTrayTipText();
+    wcsncpy_s(g_nid.szTip, tip.c_str(), _TRUNCATE);
+
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(NOTIFYICONDATAW);
+    nid.hWnd = g_nid.hWnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_TIP;
+    wcsncpy_s(nid.szTip, g_nid.szTip, _TRUNCATE);
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
 static void AddTrayIcon(HWND hWnd) {
     memset(&g_nid, 0, sizeof(g_nid));
     g_nid.cbSize = sizeof(NOTIFYICONDATAW);
     g_nid.hWnd = hWnd;
     g_nid.uID = 1;
-    g_nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    g_nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
     g_nid.hIcon = GetAppropriateTrayIcon(hWnd);
 
-    wcscpy_s(g_nid.szTip, L"Turn Off Display Without Sleep\nLeft-click: Turn off display\nRight-click: Menu");
-    Shell_NotifyIconW(NIM_ADD, &g_nid);
+    std::wstring tip = BuildTrayTipText();
+    wcsncpy_s(g_nid.szTip, tip.c_str(), _TRUNCATE);
 
-    g_nid.uVersion = NOTIFYICON_VERSION_4;
-    Shell_NotifyIconW(NIM_SETVERSION, &g_nid);
+    if (!Shell_NotifyIconW(NIM_ADD, &g_nid)) {
+        g_nid.cbSize = NOTIFYICONDATAW_V3_SIZE;
+        Shell_NotifyIconW(NIM_ADD, &g_nid);
+    }
 }
 
 static void UpdateTrayIcon(HWND hWnd) {
@@ -321,7 +350,9 @@ static LRESULT CALLBACK MainWindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
                     Config::SetAutoStartEnabled(!Config::IsAutoStartEnabled());
                     break;
                 case ID_TRAY_CHANGE_HOTKEY:
-                    HotkeyDialog::Show(hWnd);
+                    if (HotkeyDialog::Show(hWnd)) {
+                        UpdateTrayTip();
+                    }
                     break;
                 case ID_TRAY_EXIT:
                     DestroyWindow(hWnd);

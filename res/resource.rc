@@ -5,7 +5,7 @@
 // Application Manifest
 1 RT_MANIFEST "app.manifest"
 
-// Application Icons (Derived from monitor.svg)
+// Application Icons
 IDI_APP_ICON ICON "app.ico"
 IDI_ICON_DARK_TASKBAR ICON "icon_dark_taskbar.ico"
 IDI_ICON_LIGHT_TASKBAR ICON "icon_light_taskbar.ico"
