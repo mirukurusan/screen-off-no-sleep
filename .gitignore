@@ -1,0 +1,22 @@
+# Build outputs
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.o
+*.obj
+*.a
+*.map
+
+# Windhawk mod build output
+*.wh.dll
+
+# IDE and editor files
+.vscode/
+.idea/
+*.user
+*.suo
+*.swp
+*~
