@@ -6,6 +6,7 @@
 #include "power_manager.h"
 #include "input_listener.h"
 #include "hotkey_dialog.h"
+#include "about_dialog.h"
 #include "../res/resource.h"
 
 static const wchar_t* MAIN_WINDOW_CLASS = L"ScreenOffNoSleepMainWindow";
@@ -275,7 +276,12 @@ static void ShowTrayContextMenu(HWND hWnd) {
 
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
 
-    // 4. Exit
+    // 4. About
+    AppendMenuW(hMenu, MF_STRING, ID_TRAY_ABOUT, L"About...");
+
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+
+    // 5. Exit
     AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"Exit");
 
     SetForegroundWindow(hWnd);
@@ -354,6 +360,9 @@ static LRESULT CALLBACK MainWindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
                         UpdateTrayTip();
                     }
                     break;
+                case ID_TRAY_ABOUT:
+                    AboutDialog::Show(hWnd);
+                    break;
                 case ID_TRAY_EXIT:
                     DestroyWindow(hWnd);
                     break;
@@ -422,7 +431,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lp
     }
 
     // 4. Initialize Common Controls
-    INITCOMMONCONTROLSEX icex = {sizeof(INITCOMMONCONTROLSEX), ICC_STANDARD_CLASSES};
+    INITCOMMONCONTROLSEX icex = {sizeof(INITCOMMONCONTROLSEX), ICC_STANDARD_CLASSES | ICC_LINK_CLASS};
     InitCommonControlsEx(&icex);
 
     // 5. Register TaskbarCreated message
