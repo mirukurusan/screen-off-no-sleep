@@ -2,20 +2,6 @@
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-where x86_64-w64-mingw32-clang++ >nul 2>nul
-if %ERRORLEVEL% neq 0 (
-    if exist "E:\Tools\llvm-mingw\bin\x86_64-w64-mingw32-clang++.exe" (
-        set "PATH=E:\Tools\llvm-mingw\bin;%PATH%"
-    )
-)
-
-where g++.exe >nul 2>nul
-if %ERRORLEVEL% neq 0 (
-    if exist "E:\Tools\mingw64\bin\g++.exe" (
-        set "PATH=E:\Tools\mingw64\bin;%PATH%"
-    )
-)
-
 set "TARGET_ARCH=%~1"
 if "%TARGET_ARCH%"=="" set "TARGET_ARCH=all"
 
@@ -91,7 +77,7 @@ if %ERRORLEVEL% neq 0 (
 )
 
 echo [2/2] Compiling %ARCH% Executable...
-%CXX_COMPILER% -O2 -std=c++17 -Wall -mwindows -municode ^
+%CXX_COMPILER% -O2 -std=c++17 -Wall -mwindows -municode -static ^
     src\main.cpp ^
     src\config.cpp ^
     src\power_manager.cpp ^
