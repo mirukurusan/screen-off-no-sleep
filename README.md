@@ -1,6 +1,10 @@
 # Turn Off Display Without Sleep
 
-A [Windhawk](https://windhawk.net/) mod for Windows laptops and tablets with **Modern Standby (S0 Low Power Idle / S0ix)**. It turns the physical display off cleanly on demand while keeping background audio playback, downloads, and mobile hotspots running uninterrupted.
+A lightweight Windows utility and [Windhawk](https://windhawk.net/) mod for laptops and tablets with **Modern Standby (S0 Low Power Idle / S0ix)**. It turns the physical display off cleanly on demand while keeping background audio playback, downloads, and mobile hotspots running uninterrupted.
+
+Available as:
+* **Standalone Executable (`screen-off-no-sleep.exe`)**: A dedicated system tray application with an interactive hotkey dialog, registry persistence, light/dark taskbar adaptive icons, and Per-Monitor V2 High-DPI support.
+* **Windhawk Mod ([screen-off-no-sleep](https://windhawk.net/mods/screen-off-no-sleep))**: A module available on the official Windhawk repository for users managing their tweaks via the Windhawk mod manager (source in `windhawk-mod/screen-off-no-sleep.wh.cpp`).
 
 ---
 
@@ -13,22 +17,24 @@ On modern Windows laptops running **[Modern Standby (S0ix)](https://learn.micros
 | **User-Initiated Sleep / Display Off** | Clicking "Sleep", closing lid (sleep action), or calling `SC_MONITORPOWER 2` / `SetSuspendState` | Windows Power Dependency Coordinator (PDC) enters an explicit sleep transition. **[Desktop Activity Moderator (DAM)](https://learn.microsoft.com/en-us/windows-hardware/design/device-experiences/prepare-software-for-modern-standby)** immediately suspends Win32 processes. | **Terminated / Paused** ([Network teardown](https://learn.microsoft.com/en-us/windows-hardware/design/device-experiences/modern-standby-network-connectivity)) |
 | **Natural Display Timeout** | Inactivity timeout (`Video Idle Timeout`) | Windows enters the *Screen Off (No-CS)* phase. Active audio streams (`PowerRequestAudio`) and mobile hotspot (`PowerRequestSystem`) **[block the transition to sleep indefinitely](https://learn.microsoft.com/en-us/windows-hardware/design/device-experiences/modern-standby-states)**. | **Continues Running** |
 
-Traditionally, users who want to turn off the screen while listening to music or sharing Wi-Fi had to wait for their full display timeout (e.g. 5–10 minutes) or set clumsy lock-screen workarounds that force PIN / Windows Hello re-authentication every time.
+Traditionally, users who want to turn off the screen while listening to music or sharing Wi-Fi had to wait for their full display timeout (e.g. 5–10 minutes) or set lock-screen workarounds that force PIN / Windows Hello re-authentication every time.
 
-**Turn Off Display Without Sleep** solves this by programmatically triggering the natural idle path on demand.
+**Turn Off Display Without Sleep** triggers this natural idle path programmatically on demand.
 
 ---
 
 ## 2. How It Works (Architecture & Principles)
 
-The mod acts as a state machine managing display timeouts and visual overlays:
+The application operates as a state machine managing display timeouts and visual overlays:
 
 ```
 [ User Action ]
-  ├── Global Hotkey (Win+Alt+L)
+  ├── Global Hotkey (Default: Win+Alt+L)
+  ├── System Tray Icon (Left-click / Double-click)
+  ├── Duplicate Launch (Double-click screen-off-no-sleep.exe)
   ├── Hardware Power Button (Surface / 2-in-1 HID)
   ├── Laptop Lid Close (LIDACTION = 0)
-  └── Window Message (WindhawkScreenOffNoSleep_Trigger)
+  └── Window Message (ScreenOffNoSleep_Trigger)
          │
          ▼
 [ Step 1: Instant Blackout Overlay ]
@@ -37,10 +43,10 @@ The mod acts as a state machine managing display timeouts and visual overlays:
          │
          ▼
 [ Step 2: Dynamic 1-Second Timeout Injection ]
-  • Saves the active scheme GUID and current AC/DC timeouts to mod storage.
+  • Saves the active scheme GUID and current AC/DC timeouts to persistent storage.
   • Dynamically writes VIDEOIDLE = 1 s to the active Windows power scheme.
   • Because the user is not touching mouse/keyboard, Windows PDC marks the system
-    as qualifying for a natural "Video Idle Timeout" ([firmware notification](https://learn.microsoft.com/en-us/windows-hardware/design/device-experiences/modern-standby-firmware-notifications)).
+    as qualifying for a natural "Video Idle Timeout" (firmware notification).
          │
          ▼
 [ Step 3: Hardware Monitor Power-Down ]
@@ -58,43 +64,59 @@ The mod acts as a state machine managing display timeouts and visual overlays:
 ### Key Technical Highlights
 
 1. **Active Desktop Compatibility (No Forced Lock Screen)**:
-   Earlier approaches relied on `GUID_VIDEO_CONSOLE_LOCK_TIMEOUT_LOCAL` (`VIDEOCONLOCK`), which required locking the workstation first. This mod targets `GUID_VIDEO_IDLE_TIMEOUT_LOCAL` (`VIDEOIDLE`), allowing the user to turn off the display and wake straight back to their working desktop with no password or PIN delay.
+   Targets `GUID_VIDEO_IDLE_TIMEOUT` (`VIDEOIDLE`), allowing the user to turn off the display and wake straight back to their working desktop with no password or PIN prompt.
 2. **Instant Visual Blackout**:
-   Display controllers, TCONs, and GPU driver pipes often take 1–2 seconds to complete an idle power-down sequence. The mod instantly displays a pitch-black `WS_EX_TOPMOST` window so the display appears turned off immediately upon user input.
+   Displays a pitch-black `WS_EX_TOPMOST` window so the display appears turned off immediately upon user input while the GPU pipeline finishes its hardware power-down sequence.
 3. **Failsafe Watchdog**:
-   If an unexpected user action (e.g. accidental mouse shake) or an active application holding a display power request (`ES_DISPLAY_REQUIRED` / video playback / presentation) prevents the idle transition, a 3-second watchdog timer automatically cleans up the overlay and restores the original power timeout.
+   If an unexpected user action (e.g. accidental mouse shake) or an active application holding `ES_DISPLAY_REQUIRED` prevents the idle transition, a 3-second watchdog timer cleans up the overlay and restores the original power timeout automatically.
 4. **Crash-Resilient State Restoration**:
-   Before injecting the 1-second timeout, the mod snapshots the active power plan GUID and current AC/DC timeouts into mod storage (`Wh_SetBinaryValue`). The original values are restored and cleared once hardware display-off is confirmed. If the system or tool process terminates mid-flow (e.g. power loss or crash), the original timeout is automatically recovered upon the next startup.
-
-### What Happens on an Unclean Exit?
-The 1-second timeout only exists in the active power plan for the 1–3 seconds between trigger and hardware display power-down. If the tool process is forcefully terminated during those few seconds (system crash, power loss, or process kill):
-* The 1-second timeout remains in the active power plan until the mod runs again and automatically restores the original timeout from storage (`RecoverSavedPowerState`).
-* If the screen turns off after one second of idle while the mod is disabled or uninstalled, simply re-adjust "Turn off my screen after" in Windows Settings.
+   Before injecting the 1-second timeout, the application snapshots the active power plan GUID and current AC/DC timeouts into registry storage (`SavedPowerState`). If the process terminates unexpectedly mid-flow (e.g. power loss), the original timeout is automatically recovered upon the next startup.
 
 ---
 
-## 3. Supported Triggers
+## 3. Standalone Application Features
 
-The mod supports multiple activation methods:
+The standalone executable (`screen-off-no-sleep.exe`) provides a complete native Windows experience:
+
+* **System Tray Resident**:
+  Runs quietly in the notification area. Left-clicking or double-clicking the tray icon immediately triggers display off. Right-clicking opens the full context menu.
+* **Hotkey Configuration**:
+  Allows customizing the global hotkey via modifier checkboxes (`Win`, `Alt`, `Ctrl`, `Shift`), a key dropdown, live preview, and a one-click "Disable Hotkey" option. Validates hotkey conflicts before applying.
+* **Single-Instance Duplicate Trigger**:
+  Running a second instance of `screen-off-no-sleep.exe` (e.g. from a desktop shortcut, Stream Deck, or batch file) signals the running background instance to turn off the display immediately and exits cleanly.
+* **Windows Registry Persistence**:
+  Settings are stored in `HKEY_CURRENT_USER\Software\ScreenOffNoSleep`.
+* **Run at Startup**:
+  Includes a toggle in the tray menu to automatically register or unregister the app in Windows Task Scheduler, ensuring it launches with elevated privileges at user logon without UAC prompts.
+
+---
+
+## 4. Supported Triggers
 
 * **Global Hotkey** *(Default: `Win+Alt+L`)*:
-  Global keyboard shortcut to immediately turn off the display. Fully customizable in settings.
+  Global keyboard shortcut to immediately turn off the display. Fully customizable or can be disabled.
+* **Tray Icon**:
+  Left-click the notification icon or select **Turn Off Display Now** from the right-click menu.
 * **Laptop Lid Close**:
-  Closing the laptop lid triggers display-off instantly while keeping tasks alive (requires native lid action set to "Do nothing").
-* **Hardware Power Button (Surface & Modern 2-in-1s)**:
-  Directly intercepts hardware HID power button reports, bypassing Windows sleep transitions (requires native power button action set to "Do nothing").
+  Closing the laptop lid triggers display-off instantly while keeping background tasks alive (requires native lid action set to "Do nothing").
+* **Hardware Power Button (Surface & 2-in-1s)**:
+  Intercepts HID power button reports, bypassing Windows sleep transitions (requires native power button action set to "Do nothing").
 * **External Window Message (IPC / Automation)**:
-  Third-party applications, Stream Deck, macro tools, or scripts can trigger the display-off flow by broadcasting or posting the registered window message:
-  ```cpp
-  // Registered message string
-  "WindhawkScreenOffNoSleep_Trigger"
-  ```
-  The mod configures `ChangeWindowMessageFilterEx` to accept this message across UIPI integrity boundaries (including standard user processes).
+  Broadcast or post a registered window message from external scripts or automation tools. The message name and the required sender privileges depend on the delivery form:
+  * **Standalone executable** — message `ScreenOffNoSleep_Trigger`:
+    The application requires and runs with Administrator privileges, and it does not relax User Interface Privilege Isolation (UIPI). The triggering script or tool must therefore also run as **Administrator**; broadcasts from a non-elevated process are silently discarded.
+  * **Windhawk mod** — message `WindhawkScreenOffNoSleep_Trigger`:
+    The mod explicitly allows the message through UIPI (`ChangeWindowMessageFilterEx`), so the triggering script or tool can run as a **standard user**.
 
-  **Automation Examples**:
+  The message carries no payload; `wParam` and `lParam` are ignored.
 
-  * **PowerShell** (taskbar shortcut or script):
+  * **PowerShell**:
     ```powershell
+    # Standalone executable (run this script as Administrator):
+    $MessageName = "ScreenOffNoSleep_Trigger"
+    # Windhawk mod (standard user):
+    # $MessageName = "WindhawkScreenOffNoSleep_Trigger"
+
     Add-Type @"
     using System;
     using System.Runtime.InteropServices;
@@ -103,51 +125,31 @@ The mod supports multiple activation methods:
         public static extern uint RegisterWindowMessage(string lpString);
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
-        public static void Trigger() {
-            uint msg = RegisterWindowMessage("WindhawkScreenOffNoSleep_Trigger");
+        public static void Trigger(string name) {
+            uint msg = RegisterWindowMessage(name);
             if (msg != 0) {
                 PostMessage((IntPtr)0xffff, msg, IntPtr.Zero, IntPtr.Zero);
             }
         }
     }
     "@
-    [ScreenOff]::Trigger()
+    [ScreenOff]::Trigger($MessageName)
     ```
-
   * **AutoHotkey (v2)**:
     ```ahk
-    msg := DllCall("RegisterWindowMessage", "Str", "WindhawkScreenOffNoSleep_Trigger", "UInt")
+    ; Standalone executable (run the script as Administrator):
+    ; name := "ScreenOffNoSleep_Trigger"
+    ; Windhawk mod (standard user):
+    name := "WindhawkScreenOffNoSleep_Trigger"
+    msg := DllCall("RegisterWindowMessage", "Str", name, "UInt")
     DllCall("PostMessage", "Ptr", 0xFFFF, "UInt", msg, "Ptr", 0, "Ptr", 0)
     ```
 
 ---
 
-## 4. Hardware Button Handling & Privilege Isolation (UIPI)
-
-### The Privilege Challenge (UIPI & UIAccess)
-By default, Windhawk tool mods run at the interactive user's standard integrity level. When an elevated application (such as an Administrator Command Prompt, PowerShell, or Task Manager) holds foreground focus, Windows **UIPI (User Interface Privilege Isolation)** in `win32k.sys` drops background raw input sink (`RIDEV_INPUTSINK`) messages to prevent unauthorized input monitoring. Furthermore, standard-integrity windows cannot reliably overlay elevated windows or system surfaces.
-
-This mod solves this by targeting Windhawk's **`windhawk-mod-uiaccess.exe`** execution host:
-```cpp
-// @include         windhawk-mod-uiaccess.exe
-// @include         windhawk.exe
-```
-With the `UIAccess` privilege, Windows permits the mod's background input sink to receive hardware button events even when an elevated administrator window is focused, while ensuring the blackout overlay can cleanly cover elevated windows and the Start menu without requiring full administrator elevation (`windhawk-mod-elevated.exe`).
-
-### Hardware Button Implementations (Surface / 2-in-1s vs Clamshells)
-
-| Device Type | Power Button Mechanism | Mod Behavior |
-| :--- | :--- | :--- |
-| **Microsoft Surface Family** (Pro, Go, Laptop Studio, Book) | **Virtual HID Framework (`VHF.sys`)** + **`buttonconverter.sys`** reporting under `UsagePage 0x01, Usage 0x0D` (Portable Device Control) | **Fully Supported** via HID Raw Input. |
-| **Windows 2-in-1 / Slate Devices** (Dell XPS 2-in-1, HP Spectre x360, ThinkPad Yoga, ROG Flow) | **Intel HID Event Filter (`INT33D5`)** / Slate Button Array implementing Microsoft's `System.Client.Tablet.Buttons` specification | **Fully Supported** via HID Raw Input. |
-| **External USB / Bluetooth Keyboards** | Standard HID Consumer (`0x0C/0x01`) or System Control (`0x01/0x80`) Power/Sleep keys | **Fully Supported** via HID Raw Input. |
-| **Traditional Clamshell Laptops & Desktops** | ACPI Control Method Button (`ACPI\PNP0C0C`) routed to motherboard EC/PCH | When native button action is "Do nothing" (`0`), Windows kernel power manager (`PopDispatchButtonEvent`) discards the interrupt before user mode sees it. **Use the Trigger Hotkey (`Win+Alt+L`) or Lid Close instead.** |
-
----
-
 ## 5. Prerequisites
 
-To allow this mod to take control of lid-close or power button events, Windows native actions must be set to **"Do nothing" (`0`)** so Windows does not trigger its built-in sleep transition.
+To allow this tool to take control of lid-close or power button events, Windows native actions must be set to **"Do nothing" (`0`)** so Windows does not trigger its built-in sleep transition.
 
 Open an elevated Command Prompt or PowerShell and execute:
 
@@ -159,10 +161,10 @@ powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0
 powercfg /setactive SCHEME_CURRENT
 ```
 
-> **Warning**: With the lid action set to "Do nothing", closing the lid and putting the laptop into a backpack or bag will keep the system running (until the regular system sleep timeout). Make sure to explicitly sleep or shut down your laptop before bagging it.
+> **Warning**: With the lid action set to "Do nothing", closing the lid and putting the laptop into a bag will keep the system running (until the regular system sleep timeout). Explicitly sleep or shut down your laptop before bagging it.
 
 ### Reverting Prerequisites
-If you disable or uninstall this mod and wish to restore native Windows sleep actions:
+To restore native Windows sleep actions:
 ```cmd
 powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 1
 powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 1
@@ -173,48 +175,66 @@ powercfg /setactive SCHEME_CURRENT
 
 ---
 
-## 6. Configuration & Settings
+## 6. Build Instructions
 
-The mod provides configurable options in the Windhawk Mod Settings UI:
+### Building the Standalone Application
+The standalone application supports **x64**, **x86**, and **ARM64** architectures using [LLVM-MinGW](https://github.com/mstorsjo/llvm-mingw).
 
-* **Lock workstation after display turns off (`LockOnScreenOff`)** *(Default: `false`)*:
-  * `false`: Display powers down while keeping desktop unlocked. Waking up immediately returns to your open applications.
-  * `true`: Silently locks the workstation in the dark once the display powers down, requiring PIN/Windows Hello on wake.
-* **Trigger hotkey (`TriggerHotkey`)** *(Default: `Win+Alt+L`)*:
-  * Global system-wide shortcut to turn off the display instantly.
-* **Turn off display on lid close (`HandleLidClose`)** *(Default: `false`)*:
-  * Triggers display-off immediately when the laptop lid is closed (requires enabling this option and setting native lid action to "Do nothing").
-* **Turn off display on power button (`HandlePowerButton`)** *(Default: `false`)*:
-  * Listens for HID button events on Surface and compatible 2-in-1 devices (requires enabling this option and setting native power button action to "Do nothing").
+#### Batch Script (Recommended)
+Run `build.bat` to build all architectures, or specify a target architecture:
+
+```cmd
+:: Build all architectures (x64, x86, arm64)
+build.bat
+
+:: Or build a specific architecture
+build.bat x64
+build.bat x86
+build.bat arm64
+```
+
+Generated binaries:
+* `screen-off-no-sleep-x64.exe`
+* `screen-off-no-sleep-x86.exe`
+* `screen-off-no-sleep-arm64.exe`
+
+#### Manual Build Commands
+Compile with the corresponding LLVM-MinGW toolchain:
+
+* **x64**:
+  ```cmd
+  x86_64-w64-mingw32-windres -I res -i res\resource.rc -o res\resource-x64.o
+  x86_64-w64-mingw32-clang++ -O2 -std=c++17 -Wall -mwindows -municode -static src\*.cpp res\resource-x64.o -o screen-off-no-sleep-x64.exe -lpowrprof -luser32 -lhid -lgdi32 -ladvapi32 -lshell32 -lcomctl32
+  ```
+
+* **x86**:
+  ```cmd
+  i686-w64-mingw32-windres -I res -i res\resource.rc -o res\resource-x86.o
+  i686-w64-mingw32-clang++ -O2 -std=c++17 -Wall -mwindows -municode -static src\*.cpp res\resource-x86.o -o screen-off-no-sleep-x86.exe -lpowrprof -luser32 -lhid -lgdi32 -ladvapi32 -lshell32 -lcomctl32
+  ```
+
+* **ARM64**:
+  ```cmd
+  aarch64-w64-mingw32-windres -I res -i res\resource.rc -o res\resource-arm64.o
+  aarch64-w64-mingw32-clang++ -O2 -std=c++17 -Wall -mwindows -municode -static src\*.cpp res\resource-arm64.o -o screen-off-no-sleep-arm64.exe -lpowrprof -luser32 -lhid -lgdi32 -ladvapi32 -lshell32 -lcomctl32
+  ```
+
+### Installing / Building the Windhawk Mod
+* **Direct Install**: Install directly from the official Windhawk catalog at [windhawk.net/mods/screen-off-no-sleep](https://windhawk.net/mods/screen-off-no-sleep).
+* **Manual Local Mod**:
+  1. In [Windhawk](https://windhawk.net/), navigate to **Mods** -> **Create Local Mod**.
+  2. Copy the contents of `windhawk-mod/screen-off-no-sleep.wh.cpp` into the editor.
+  3. Click **Compile and run**.
 
 ---
 
-## 7. Build & Installation
-
-### Requirements
-* [Windhawk v2.0+](https://windhawk.net/)
-* Windows 10 / Windows 11 (with Modern Standby S0ix support recommended)
-
-### Compiler Options
-The mod requires the following Windows runtime libraries:
-```
--lpowrprof -luser32 -lhid -lgdi32
-```
-
-### Installation
-1. In Windhawk, navigate to **Mods** -> **Create Local Mod**.
-2. Copy the contents of `windhawk-mod/screen-off-no-sleep.wh.cpp` into the editor.
-3. Click **Compile and run**.
-
----
-
-## 8. License
+## 7. License
 
 MIT License. See [LICENSE](LICENSE) for details.
 
 ---
 
-## 9. References & Microsoft Technical Documentation
+## 8. References & Microsoft Technical Documentation
 
 For deeper understanding of Windows power management and Modern Standby internals, refer to Microsoft's official hardware design guides:
 
