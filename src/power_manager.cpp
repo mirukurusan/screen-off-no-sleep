@@ -1,5 +1,6 @@
 #include "power_manager.h"
 #include <cstring>
+#include <vector>
 
 namespace PowerManager {
 
@@ -17,7 +18,7 @@ static const GUID GUID_VIDEO_IDLE_TIMEOUT_LOCAL = {
 static const wchar_t* BLACKOUT_WINDOW_CLASS = L"ScreenOffNoSleepBlackout";
 
 static HWND g_hTargetWnd = nullptr;
-static HWND g_hBlackoutWnd = nullptr;
+static std::vector<HWND> g_blackoutWindows;
 static CRITICAL_SECTION g_powerLock;
 static bool g_powerLockInitialized = false;
 
@@ -49,8 +50,6 @@ static LRESULT CALLBACK BlackoutWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             EndPaint(hwnd, &ps);
             return 0;
         }
-        case WM_NCHITTEST:
-            return HTTRANSPARENT;
         case WM_SETCURSOR:
             SetCursor(NULL);
             return TRUE;
@@ -59,39 +58,82 @@ static LRESULT CALLBACK BlackoutWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
     }
 }
 
+struct MonitorInfoItem {
+    RECT rc;
+    bool isPrimary;
+};
+
+static BOOL CALLBACK EnumMonitorsProc(HMONITOR hMonitor, HDC /*hdcMonitor*/, LPRECT /*lprcMonitor*/, LPARAM dwData) {
+    auto* items = reinterpret_cast<std::vector<MonitorInfoItem>*>(dwData);
+    MONITORINFO mi = {sizeof(MONITORINFO)};
+    if (GetMonitorInfoW(hMonitor, &mi)) {
+        MonitorInfoItem item;
+        item.rc = mi.rcMonitor;
+        item.isPrimary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
+        items->push_back(item);
+    }
+    return TRUE;
+}
+
 void ShowBlackoutOverlay() {
-    if (g_hBlackoutWnd && IsWindow(g_hBlackoutWnd)) {
+    if (!g_blackoutWindows.empty()) {
         return;
     }
 
-    int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    int vcx = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    int vcy = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    std::vector<MonitorInfoItem> monitors;
+    EnumDisplayMonitors(nullptr, nullptr, EnumMonitorsProc, reinterpret_cast<LPARAM>(&monitors));
 
-    g_hBlackoutWnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
-        BLACKOUT_WINDOW_CLASS,
-        L"",
-        WS_POPUP | WS_VISIBLE,
-        vx, vy, vcx, vcy,
-        nullptr, nullptr, GetModuleHandle(nullptr), nullptr
-    );
+    if (monitors.empty()) {
+        MonitorInfoItem fallback = {};
+        fallback.rc.left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        fallback.rc.top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        fallback.rc.right = fallback.rc.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        fallback.rc.bottom = fallback.rc.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        fallback.isPrimary = true;
+        monitors.push_back(fallback);
+    }
 
-    if (g_hBlackoutWnd) {
-        SetLayeredWindowAttributes(g_hBlackoutWnd, 0, 255, LWA_ALPHA);
-        SetWindowPos(g_hBlackoutWnd, HWND_TOPMOST, vx, vy, vcx, vcy, SWP_SHOWWINDOW | SWP_NOACTIVATE);
-        UpdateWindow(g_hBlackoutWnd);
+    HWND hPrimaryWnd = nullptr;
+    for (const auto& item : monitors) {
+        int x = item.rc.left;
+        int y = item.rc.top;
+        int cx = item.rc.right - item.rc.left;
+        int cy = item.rc.bottom - item.rc.top;
+
+        HWND hWnd = CreateWindowExW(
+            WS_EX_TOPMOST,
+            BLACKOUT_WINDOW_CLASS,
+            L"",
+            WS_POPUP | WS_VISIBLE,
+            x, y, cx, cy,
+            nullptr, nullptr, GetModuleHandle(nullptr), nullptr
+        );
+
+        if (hWnd) {
+            SetWindowPos(hWnd, HWND_TOPMOST, x, y, cx, cy, SWP_SHOWWINDOW);
+            UpdateWindow(hWnd);
+            g_blackoutWindows.push_back(hWnd);
+
+            if (item.isPrimary || !hPrimaryWnd) {
+                hPrimaryWnd = hWnd;
+            }
+        }
+    }
+
+    if (hPrimaryWnd) {
+        SetForegroundWindow(hPrimaryWnd);
         Config::Log(L"Blackout overlay displayed");
     }
 }
 
 void DestroyBlackoutOverlay() {
-    if (g_hBlackoutWnd) {
-        if (IsWindow(g_hBlackoutWnd)) {
-            DestroyWindow(g_hBlackoutWnd);
+    if (!g_blackoutWindows.empty()) {
+        for (HWND hWnd : g_blackoutWindows) {
+            if (hWnd && IsWindow(hWnd)) {
+                DestroyWindow(hWnd);
+            }
         }
-        g_hBlackoutWnd = nullptr;
+        g_blackoutWindows.clear();
         Config::Log(L"Blackout overlay destroyed");
     }
 }
