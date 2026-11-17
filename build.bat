@@ -86,7 +86,7 @@ echo [2/2] Compiling %ARCH% Executable...
     src\about_dialog.cpp ^
     res\resource-%ARCH%.o ^
     -o screen-off-no-sleep-%ARCH%.exe ^
-    -lpowrprof -luser32 -lhid -lgdi32 -ladvapi32 -lshell32 -lcomctl32
+    -lpowrprof -luser32 -lhid -lgdi32 -ladvapi32 -lshell32 -lcomctl32 -lole32 -loleaut32
 
 if %ERRORLEVEL% equ 0 (
     echo Successfully built screen-off-no-sleep-%ARCH%.exe

@@ -1,6 +1,8 @@
 #include "config.h"
 #include <cstdio>
 #include <vector>
+#include <initguid.h>
+#include <taskschd.h>
 
 namespace Config {
 
@@ -152,53 +154,229 @@ void DeleteSavedPowerState() {
     }
 }
 
-static const wchar_t* RUN_KEY_PATH = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-static const wchar_t* RUN_VALUE_NAME = L"ScreenOffNoSleep";
+static const wchar_t* AUTOSTART_TASK_NAME = L"ScreenOffNoSleep";
+
+struct ComScope {
+    HRESULT hr;
+    ComScope() : hr(CoInitializeEx(nullptr, COINIT_MULTITHREADED)) {}
+    ~ComScope() {
+        if (SUCCEEDED(hr)) {
+            CoUninitialize();
+        }
+    }
+};
 
 bool IsAutoStartEnabled() {
-    HKEY hKey = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY_PATH, 0, KEY_READ, &hKey) != ERROR_SUCCESS) {
+    ComScope com;
+
+    ITaskService* pService = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_TaskScheduler, nullptr, CLSCTX_INPROC_SERVER, IID_ITaskService, reinterpret_cast<void**>(&pService));
+    if (FAILED(hr) || !pService) {
         return false;
     }
 
-    wchar_t pathBuf[MAX_PATH * 2] = {0};
-    DWORD bufSize = sizeof(pathBuf);
-    DWORD type = REG_SZ;
-    LSTATUS status = RegQueryValueExW(hKey, RUN_VALUE_NAME, nullptr, &type, reinterpret_cast<LPBYTE>(pathBuf), &bufSize);
-    RegCloseKey(hKey);
-    return status == ERROR_SUCCESS;
+    VARIANT varEmpty;
+    VariantInit(&varEmpty);
+    hr = pService->Connect(varEmpty, varEmpty, varEmpty, varEmpty);
+    if (FAILED(hr)) {
+        pService->Release();
+        return false;
+    }
+
+    ITaskFolder* pRootFolder = nullptr;
+    BSTR bstrRoot = SysAllocString(L"\\");
+    hr = pService->GetFolder(bstrRoot, &pRootFolder);
+    SysFreeString(bstrRoot);
+    if (FAILED(hr) || !pRootFolder) {
+        pService->Release();
+        return false;
+    }
+
+    bool isEnabled = false;
+    BSTR bstrTaskName = SysAllocString(AUTOSTART_TASK_NAME);
+    IRegisteredTask* pTask = nullptr;
+    hr = pRootFolder->GetTask(bstrTaskName, &pTask);
+    SysFreeString(bstrTaskName);
+
+    if (SUCCEEDED(hr) && pTask) {
+        TASK_STATE state = TASK_STATE_UNKNOWN;
+        if (SUCCEEDED(pTask->get_State(&state))) {
+            isEnabled = (state != TASK_STATE_DISABLED);
+        } else {
+            VARIANT_BOOL vbEnabled = VARIANT_FALSE;
+            if (SUCCEEDED(pTask->get_Enabled(&vbEnabled))) {
+                isEnabled = (vbEnabled == VARIANT_TRUE);
+            }
+        }
+        pTask->Release();
+    }
+
+    pRootFolder->Release();
+    pService->Release();
+    return isEnabled;
 }
 
 bool SetAutoStartEnabled(bool enable) {
-    HKEY hKey = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY_PATH, 0, KEY_WRITE, &hKey) != ERROR_SUCCESS) {
+    ComScope com;
+
+    ITaskService* pService = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_TaskScheduler, nullptr, CLSCTX_INPROC_SERVER, IID_ITaskService, reinterpret_cast<void**>(&pService));
+    if (FAILED(hr) || !pService) {
+        Log(L"CoCreateInstance(CLSID_TaskScheduler) failed: 0x%08X", hr);
         return false;
     }
 
-    LSTATUS status = ERROR_SUCCESS;
-    if (enable) {
-        wchar_t exePath[MAX_PATH] = {0};
-        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-
-        std::wstring command = L"\"";
-        command += exePath;
-        command += L"\"";
-
-        DWORD sizeInBytes = static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t));
-        status = RegSetValueExW(
-            hKey,
-            RUN_VALUE_NAME,
-            0,
-            REG_SZ,
-            reinterpret_cast<const BYTE*>(command.c_str()),
-            sizeInBytes
-        );
-    } else {
-        status = RegDeleteValueW(hKey, RUN_VALUE_NAME);
+    VARIANT varEmpty;
+    VariantInit(&varEmpty);
+    hr = pService->Connect(varEmpty, varEmpty, varEmpty, varEmpty);
+    if (FAILED(hr)) {
+        Log(L"ITaskService::Connect failed: 0x%08X", hr);
+        pService->Release();
+        return false;
     }
 
-    RegCloseKey(hKey);
-    return status == ERROR_SUCCESS;
+    ITaskFolder* pRootFolder = nullptr;
+    BSTR bstrRoot = SysAllocString(L"\\");
+    hr = pService->GetFolder(bstrRoot, &pRootFolder);
+    SysFreeString(bstrRoot);
+    if (FAILED(hr) || !pRootFolder) {
+        Log(L"ITaskService::GetFolder failed: 0x%08X", hr);
+        pService->Release();
+        return false;
+    }
+
+    BSTR bstrTaskName = SysAllocString(AUTOSTART_TASK_NAME);
+    bool success = false;
+
+    if (!enable) {
+        hr = pRootFolder->DeleteTask(bstrTaskName, 0);
+        success = SUCCEEDED(hr) || (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND));
+        if (!success) {
+            Log(L"ITaskFolder::DeleteTask failed: 0x%08X", hr);
+        }
+    } else {
+        ITaskDefinition* pTask = nullptr;
+        hr = pService->NewTask(0, &pTask);
+        if (SUCCEEDED(hr) && pTask) {
+            IRegistrationInfo* pRegInfo = nullptr;
+            if (SUCCEEDED(pTask->get_RegistrationInfo(&pRegInfo)) && pRegInfo) {
+                BSTR bstrAuthor = SysAllocString(L"ScreenOffNoSleep");
+                pRegInfo->put_Author(bstrAuthor);
+                SysFreeString(bstrAuthor);
+
+                BSTR bstrDesc = SysAllocString(L"Turn Off Display Without Sleep - Auto Start");
+                pRegInfo->put_Description(bstrDesc);
+                SysFreeString(bstrDesc);
+
+                pRegInfo->Release();
+            }
+
+            IPrincipal* pPrincipal = nullptr;
+            if (SUCCEEDED(pTask->get_Principal(&pPrincipal)) && pPrincipal) {
+                pPrincipal->put_LogonType(TASK_LOGON_INTERACTIVE_TOKEN);
+                pPrincipal->put_RunLevel(TASK_RUNLEVEL_HIGHEST);
+                pPrincipal->Release();
+            }
+
+            ITaskSettings* pSettings = nullptr;
+            if (SUCCEEDED(pTask->get_Settings(&pSettings)) && pSettings) {
+                pSettings->put_StartWhenAvailable(VARIANT_TRUE);
+                pSettings->put_DisallowStartIfOnBatteries(VARIANT_FALSE);
+                pSettings->put_StopIfGoingOnBatteries(VARIANT_FALSE);
+                pSettings->put_AllowHardTerminate(VARIANT_TRUE);
+                pSettings->put_MultipleInstances(TASK_INSTANCES_IGNORE_NEW);
+                pSettings->put_Priority(7);
+
+                BSTR bstrTimeLimit = SysAllocString(L"PT0S");
+                pSettings->put_ExecutionTimeLimit(bstrTimeLimit);
+                SysFreeString(bstrTimeLimit);
+
+                pSettings->Release();
+            }
+
+            ITriggerCollection* pTriggers = nullptr;
+            if (SUCCEEDED(pTask->get_Triggers(&pTriggers)) && pTriggers) {
+                ITrigger* pTrigger = nullptr;
+                if (SUCCEEDED(pTriggers->Create(TASK_TRIGGER_LOGON, &pTrigger)) && pTrigger) {
+                    ILogonTrigger* pLogonTrigger = nullptr;
+                    if (SUCCEEDED(pTrigger->QueryInterface(IID_ILogonTrigger, reinterpret_cast<void**>(&pLogonTrigger))) && pLogonTrigger) {
+                        pLogonTrigger->put_Enabled(VARIANT_TRUE);
+                        pLogonTrigger->Release();
+                    }
+                    pTrigger->Release();
+                }
+                pTriggers->Release();
+            }
+
+            IActionCollection* pActions = nullptr;
+            if (SUCCEEDED(pTask->get_Actions(&pActions)) && pActions) {
+                IAction* pAction = nullptr;
+                if (SUCCEEDED(pActions->Create(TASK_ACTION_EXEC, &pAction)) && pAction) {
+                    IExecAction* pExecAction = nullptr;
+                    if (SUCCEEDED(pAction->QueryInterface(IID_IExecAction, reinterpret_cast<void**>(&pExecAction))) && pExecAction) {
+                        wchar_t exePath[MAX_PATH] = {0};
+                        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+
+                        std::wstring workingDir = exePath;
+                        size_t lastSlash = workingDir.find_last_of(L"\\/");
+                        if (lastSlash != std::wstring::npos) {
+                            workingDir = workingDir.substr(0, lastSlash);
+                        }
+
+                        BSTR bstrPath = SysAllocString(exePath);
+                        BSTR bstrDir = SysAllocString(workingDir.c_str());
+
+                        pExecAction->put_Path(bstrPath);
+                        pExecAction->put_WorkingDirectory(bstrDir);
+
+                        SysFreeString(bstrPath);
+                        SysFreeString(bstrDir);
+
+                        pExecAction->Release();
+                    }
+                    pAction->Release();
+                }
+                pActions->Release();
+            }
+
+            IRegisteredTask* pRegisteredTask = nullptr;
+            hr = pRootFolder->RegisterTaskDefinition(
+                bstrTaskName,
+                pTask,
+                TASK_CREATE_OR_UPDATE,
+                varEmpty,
+                varEmpty,
+                TASK_LOGON_INTERACTIVE_TOKEN,
+                varEmpty,
+                &pRegisteredTask
+            );
+
+            if (SUCCEEDED(hr)) {
+                success = true;
+                if (pRegisteredTask) {
+                    pRegisteredTask->Release();
+                }
+            } else {
+                Log(L"ITaskFolder::RegisterTaskDefinition failed: 0x%08X", hr);
+            }
+
+            pTask->Release();
+        } else {
+            Log(L"ITaskService::NewTask failed: 0x%08X", hr);
+        }
+    }
+
+    HKEY hRunKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_WRITE, &hRunKey) == ERROR_SUCCESS) {
+        RegDeleteValueW(hRunKey, AUTOSTART_TASK_NAME);
+        RegCloseKey(hRunKey);
+    }
+
+    SysFreeString(bstrTaskName);
+    pRootFolder->Release();
+    pService->Release();
+
+    return success;
 }
 
 } // namespace Config
