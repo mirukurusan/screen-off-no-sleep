@@ -14,6 +14,7 @@ static const wchar_t* MUTEX_NAME = L"Local\\ScreenOffNoSleep_InstanceMutex";
 static const wchar_t* TRIGGER_MESSAGE_NAME = L"ScreenOffNoSleep_Trigger";
 
 static const UINT WM_TRAYICON = WM_USER + 200;
+static const UINT_PTR TRAY_RETRY_TIMER_ID = 0xD010;
 
 static HWND g_hWnd = nullptr;
 static NOTIFYICONDATAW g_nid = {};
@@ -195,27 +196,43 @@ static void UpdateTrayTip() {
     Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
-static void AddTrayIcon(HWND hWnd) {
-    memset(&g_nid, 0, sizeof(g_nid));
-    g_nid.cbSize = sizeof(NOTIFYICONDATAW);
-    g_nid.hWnd = hWnd;
-    g_nid.uID = 1;
-    g_nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
-    g_nid.uCallbackMessage = WM_TRAYICON;
-    g_nid.hIcon = GetAppropriateTrayIcon(hWnd);
+static bool AddTrayIcon(HWND hWnd) {
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(NOTIFYICONDATAW);
+    nid.hWnd = hWnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    nid.uCallbackMessage = WM_TRAYICON;
+    nid.hIcon = GetAppropriateTrayIcon(hWnd);
 
     std::wstring tip = BuildTrayTipText();
-    wcsncpy_s(g_nid.szTip, tip.c_str(), _TRUNCATE);
+    wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
 
-    if (!Shell_NotifyIconW(NIM_ADD, &g_nid)) {
-        g_nid.cbSize = NOTIFYICONDATAW_V3_SIZE;
-        Shell_NotifyIconW(NIM_ADD, &g_nid);
+    bool success = Shell_NotifyIconW(NIM_ADD, &nid);
+    if (!success) {
+        nid.cbSize = NOTIFYICONDATAW_V3_SIZE;
+        success = Shell_NotifyIconW(NIM_ADD, &nid);
     }
+
+    if (success) {
+        if (g_nid.hIcon && g_nid.hIcon != nid.hIcon) {
+            DestroyIcon(g_nid.hIcon);
+        }
+        g_nid = nid;
+        return true;
+    }
+
+    if (nid.hIcon) {
+        DestroyIcon(nid.hIcon);
+    }
+    return false;
 }
 
 static void UpdateTrayIcon(HWND hWnd) {
     if (!g_nid.hWnd) {
-        AddTrayIcon(hWnd);
+        if (!AddTrayIcon(hWnd)) {
+            SetTimer(hWnd, TRAY_RETRY_TIMER_ID, 1000, nullptr);
+        }
         return;
     }
 
@@ -293,7 +310,11 @@ static void ShowTrayContextMenu(HWND hWnd) {
 static LRESULT CALLBACK MainWindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == g_wmTaskbarCreated) {
         Config::Log(L"Explorer restarted; recreating tray icon");
-        AddTrayIcon(hWnd);
+        if (AddTrayIcon(hWnd)) {
+            KillTimer(hWnd, TRAY_RETRY_TIMER_ID);
+        } else {
+            SetTimer(hWnd, TRAY_RETRY_TIMER_ID, 1000, nullptr);
+        }
         return 0;
     }
 
@@ -383,12 +404,17 @@ static LRESULT CALLBACK MainWindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
             return TRUE;
 
         case WM_TIMER:
-            if (wParam == PowerManager::WATCHDOG_TIMER_ID) {
+            if (wParam == TRAY_RETRY_TIMER_ID) {
+                if (AddTrayIcon(hWnd)) {
+                    KillTimer(hWnd, TRAY_RETRY_TIMER_ID);
+                }
+            } else if (wParam == PowerManager::WATCHDOG_TIMER_ID) {
                 PowerManager::OnWatchdogTimer();
             }
             return 0;
 
         case WM_DESTROY:
+            KillTimer(hWnd, TRAY_RETRY_TIMER_ID);
             RemoveTrayIcon();
             InputListener::Shutdown();
             PowerManager::Shutdown();
@@ -397,6 +423,23 @@ static LRESULT CALLBACK MainWindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
 
         default:
             return DefWindowProcW(hWnd, uMsg, wParam, lParam);
+    }
+}
+
+static void AllowWindowMessagesThroughUipi(HWND hWnd) {
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    if (!hUser32) return;
+
+    typedef BOOL(WINAPI* PFN_ChangeWindowMessageFilterEx)(HWND, UINT, DWORD, PCHANGEFILTERSTRUCT);
+    auto pfnChangeFilter = reinterpret_cast<PFN_ChangeWindowMessageFilterEx>(
+        GetProcAddress(hUser32, "ChangeWindowMessageFilterEx"));
+    if (pfnChangeFilter) {
+        if (g_wmTaskbarCreated) {
+            pfnChangeFilter(hWnd, g_wmTaskbarCreated, MSGFLT_ALLOW, nullptr);
+        }
+        if (g_wmTriggerMessage) {
+            pfnChangeFilter(hWnd, g_wmTriggerMessage, MSGFLT_ALLOW, nullptr);
+        }
     }
 }
 
@@ -462,6 +505,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lp
         return 1;
     }
 
+    AllowWindowMessagesThroughUipi(g_hWnd);
+
     // 8. Load Settings from Registry
     bool lockOnScreenOff = false;
     bool handleLidClose = false;
@@ -479,7 +524,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lp
     InputListener::SetTriggerHotkey(triggerHotkey);
 
     // 10. Display Tray Icon
-    AddTrayIcon(g_hWnd);
+    if (!AddTrayIcon(g_hWnd)) {
+        SetTimer(g_hWnd, TRAY_RETRY_TIMER_ID, 1000, nullptr);
+    }
 
     Config::Log(L"ScreenOffNoSleep standalone application started successfully");
 
