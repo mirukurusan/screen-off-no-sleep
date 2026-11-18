@@ -216,6 +216,20 @@ bool IsAutoStartEnabled() {
     return isEnabled;
 }
 
+static std::wstring GetCurrentUserIdentifier() {
+    wchar_t user[256] = {0};
+    DWORD userSize = static_cast<DWORD>(_countof(user));
+    if (GetUserNameW(user, &userSize) && userSize > 1) {
+        wchar_t domain[256] = {0};
+        DWORD domainLen = GetEnvironmentVariableW(L"USERDOMAIN", domain, static_cast<DWORD>(_countof(domain)));
+        if (domainLen > 0 && domainLen < _countof(domain)) {
+            return std::wstring(domain) + L"\\" + user;
+        }
+        return std::wstring(user);
+    }
+    return L"";
+}
+
 bool SetAutoStartEnabled(bool enable) {
     ComScope com;
 
@@ -301,6 +315,14 @@ bool SetAutoStartEnabled(bool enable) {
                     ILogonTrigger* pLogonTrigger = nullptr;
                     if (SUCCEEDED(pTrigger->QueryInterface(IID_ILogonTrigger, reinterpret_cast<void**>(&pLogonTrigger))) && pLogonTrigger) {
                         pLogonTrigger->put_Enabled(VARIANT_TRUE);
+
+                        std::wstring userIdent = GetCurrentUserIdentifier();
+                        if (!userIdent.empty()) {
+                            BSTR bstrUser = SysAllocString(userIdent.c_str());
+                            pLogonTrigger->put_UserId(bstrUser);
+                            SysFreeString(bstrUser);
+                        }
+
                         pLogonTrigger->Release();
                     }
                     pTrigger->Release();
